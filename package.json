@@ -1,0 +1,81 @@
+{
+  "name": "sqltools-driver-netezza",
+  "displayName": "SQLTools Netezza Driver",
+  "description": "SQLTools driver for Netezza using node-netezza",
+  "version": "1.0.0",
+  "publisher": "maurice-v",
+  "author": {
+    "name": "maurice-v"
+  },
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.42.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "sqltools-driver",
+    "netezza",
+    "database",
+    "sql",
+    "IBM Netezza"
+  ],
+  "extensionDependencies": [
+    "mtxr.sqltools"
+  ],
+  "homepage": "https://github.com/maurice-v/sqltools-driver-netezza#readme",
+  "bugs": {
+    "url": "https://github.com/maurice-v/sqltools-driver-netezza/issues"
+  },
+  "activationEvents": [
+    "*",
+    "onLanguage:sql",
+    "onCommand:sqltools.*"
+  ],
+  "main": "./out/extension.js",
+  "ls": "./out/ls/plugin.js",
+  "icon": "icons/default.png",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sqltools.driver.netezza.showCreateTable",
+        "title": "Generate CREATE Script",
+        "category": "SQLTools Netezza"
+      }
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "sqltools.driver.netezza.showCreateTable",
+          "when": "viewItem =~ /^connection\\.(table|view)\\b/",
+          "group": "navigation@100"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "prepackage": "npm run build",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "@sqltools/base-driver": "latest",
+    "@sqltools/types": "latest",
+    "node-netezza": "^1.1.0",
+    "uuid": "^8.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^14.17.0",
+    "@types/uuid": "^8.3.4",
+    "@types/vscode": "^1.42.0",
+    "typescript": "^4.3.0",
+    "vsce": "^2.15.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maurice-v/sqltools-driver-netezza"
+  }
+}

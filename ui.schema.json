@@ -1,0 +1,32 @@
+{
+  "connectionMethod": {
+    "ui:widget": "hidden"
+  },
+  "server": {
+    "ui:placeholder": "e.g., localhost or 192.168.1.100"
+  },
+  "port": {
+    "ui:placeholder": "5480"
+  },
+  "database": {
+    "ui:placeholder": "Database name"
+  },
+  "username": {
+    "ui:placeholder": "Username"
+  },
+  "usePassword": {
+    "ui:widget": "radio"
+  },
+  "password": {
+    "ui:widget": "password"
+  },
+  "netezzaOptions": {
+    "secureConnection": {
+      "ui:widget": "checkbox"
+    },
+    "queryTimeout": {
+      "ui:placeholder": "30",
+      "ui:help": "Time in seconds before a query times out (0 = no timeout)"
+    }
+  }
+}

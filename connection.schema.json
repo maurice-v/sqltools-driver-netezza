@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "definitions": {
+    "database": {
+      "type": "string",
+      "title": "Database",
+      "minLength": 1
+    },
+    "username": {
+      "type": "string",
+      "title": "Username"
+    },
+    "usePassword": {
+      "type": "string",
+      "title": "Password mode",
+      "enum": ["SQLTools Driver Credentials", "Ask on connect", "Use empty password", "Save as plain text in settings"],
+      "default": "SQLTools Driver Credentials"
+    },
+    "password": {
+      "type": "string",
+      "title": "Password",
+      "minLength": 1
+    },
+    "netezzaOptions": {
+      "type": "object",
+      "title": "Netezza driver specific options",
+      "properties": {
+        "secureConnection": {
+          "type": "boolean",
+          "title": "Secure Connection (SSL/TLS)",
+          "default": false
+        },
+        "queryTimeout": {
+          "type": "number",
+          "title": "Query Timeout (seconds)",
+          "minimum": 0,
+          "default": 30,
+          "description": "Maximum time in seconds to wait for a query to complete. Set to 0 for no timeout."
+        }
+      }
+    }
+  },
+  "properties": {
+    "connectionMethod": {
+      "type": "string",
+      "title": "Connect using",
+      "enum": ["Server and Port"],
+      "default": "Server and Port"
+    }
+  },
+  "dependencies": {
+    "connectionMethod": {
+      "oneOf": [
+        {
+          "properties": {
+            "connectionMethod": {
+              "enum": ["Server and Port"]
+            },
+            "server": {
+              "type": "string",
+              "title": "Server Address",
+              "default": "localhost",
+              "minLength": 1
+            },
+            "port": {
+              "type": "number",
+              "title": "Port",
+              "minimum": 1,
+              "maximum": 65535,
+              "default": 5480
+            },
+            "database": {
+              "$ref": "#/definitions/database"
+            },
+            "username": {
+              "$ref": "#/definitions/username"
+            },
+            "usePassword": {
+              "$ref": "#/definitions/usePassword"
+            },
+            "netezzaOptions": {
+              "$ref": "#/definitions/netezzaOptions"
+            }
+          },
+          "required": ["server", "port", "database", "username"]
+        }
+      ]
+    },
+    "usePassword": {
+      "oneOf": [
+        {
+          "properties": {
+            "usePassword": {
+              "enum": ["Save as plain text in settings"]
+            },
+            "password": {
+              "$ref": "#/definitions/password"
+            }
+          },
+          "required": ["password"]
+        }
+      ]
+    }
+  },
+  "required": ["connectionMethod"]
+}
