@@ -2,6 +2,12 @@
 
 All notable changes to the SQLTools Netezza Driver will be documented in this file.
 
+## [1.0.1] - 2025-11-14
+
+### Fixed
+- Fixed missing node_modules dependencies in packaged extension
+- Driver now properly loads in SQLTools
+
 ## [1.0.0] - 2025-11-14
 
 ### Added

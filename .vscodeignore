@@ -5,8 +5,11 @@ src/**
 .git/**
 tsconfig.json
 *.vsix
-node_modules/**
 out/test/**
 sample_generate_create.sql
 .eslintrc.json
 .prettierrc
+node_modules/**/test/**
+node_modules/**/tests/**
+node_modules/**/*.md
+node_modules/**/.github/**

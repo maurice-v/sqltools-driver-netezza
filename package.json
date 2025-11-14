@@ -2,7 +2,7 @@
   "name": "sqltools-driver-netezza",
   "displayName": "SQLTools Netezza Driver",
   "description": "SQLTools driver for Netezza using node-netezza",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "maurice-v",
   "author": {
     "name": "maurice-v"
@@ -32,7 +32,8 @@
   "activationEvents": [
     "*",
     "onLanguage:sql",
-    "onCommand:sqltools.*"
+    "onCommand:sqltools.*",
+    "onView:sqltoolsViewConnectionExplorer"
   ],
   "main": "./out/extension.js",
   "ls": "./out/ls/plugin.js",
