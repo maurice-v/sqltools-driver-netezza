@@ -1,8 +1,10 @@
 import { IBaseQueries, ContextValue } from '@sqltools/types';
 
-function escapeTableName(table: any) {
-  // Extract simple table name from label if it's fully qualified
-  const simpleName = table.tableName || (table.label ? table.label.split('.').pop() : table.label) || table;
+/**
+ * Escapes and qualifies a table name for use in SQL queries
+ */
+function escapeTableName(table: any): string {
+  const simpleName = table.tableName || table.label?.split('.').pop() || table;
   
   // Generate fully qualified name
   if (table.database && table.schema) {
@@ -14,11 +16,13 @@ function escapeTableName(table: any) {
   return simpleName;
 }
 
-/** Queries to interact with Netezza database metadata */
+/**
+ * SQL queries for interacting with Netezza database metadata
+ * Uses Netezza system views (_V_*) to retrieve schema information
+ */
 const queries: IBaseQueries = {
   describeTable: (params) => {
-    // Extract simple table name from label if it's fully qualified
-    const tableName = params.tableName || (params.label ? params.label.split('.').pop() : params.label);
+    const tableName = params.tableName || params.label?.split('.').pop();
     return `
     SELECT 
       ATTNAME AS label,
@@ -51,8 +55,7 @@ const queries: IBaseQueries = {
   },
 
   fetchColumns: (params) => {
-    // Extract simple table name from label if it's fully qualified
-    const tableName = params.tableName || (params.label ? params.label.split('.').pop() : params.label);
+    const tableName = params.tableName || params.label?.split('.').pop();
     return `
     SELECT 
       C.ATTNAME AS label,
@@ -66,6 +69,7 @@ const queries: IBaseQueries = {
       '${ContextValue.COLUMN}' as "type",
       C.ATTNUM AS "columnPosition",
       true AS "isLeaf",
+      '${ContextValue.NO_CHILD}' AS "childType",
       CASE 
         WHEN C.FORMAT_TYPE LIKE '%CHAR%' THEN 'value'
         WHEN C.FORMAT_TYPE LIKE '%INT%' THEN '0'
@@ -95,7 +99,7 @@ const queries: IBaseQueries = {
     SELECT 
       TABLENAME AS label,
       '${ContextValue.TABLE}' AS "type",
-      'sqltools.table.connected' AS "contextValue",
+      '${ContextValue.RESOURCE_GROUP}.${ContextValue.TABLE}' AS "contextValue",
       OBJID AS id,
       SCHEMA AS "schema",
       CURRENT_CATALOG AS "database",
@@ -112,7 +116,7 @@ const queries: IBaseQueries = {
     SELECT 
       VIEWNAME AS label,
       '${ContextValue.VIEW}' AS "type",
-      'sqltools.view.connected' AS "contextValue",
+      '${ContextValue.RESOURCE_GROUP}.${ContextValue.VIEW}' AS "contextValue",
       OBJID AS id,
       SCHEMA AS "schema",
       CURRENT_CATALOG AS "database",

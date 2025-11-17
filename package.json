@@ -54,7 +54,14 @@
           "group": "navigation@100"
         }
       ]
-    }
+    },
+    "sqltools.connections.drivers": [
+      {
+        "driverName": "Netezza",
+        "driverAliases": ["netezza"],
+        "extensionId": "maurice-v.sqltools-driver-netezza"
+      }
+    ]
   },
   "scripts": {
     "build": "tsc -p ./",
@@ -78,5 +85,16 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/maurice-v/sqltools-driver-netezza"
-  }
+  },
+  "galleryBanner": {
+    "color": "#3E5F8A",
+    "theme": "dark"
+  },
+  "badges": [
+    {
+      "url": "https://img.shields.io/visual-studio-marketplace/v/maurice-v.sqltools-driver-netezza.svg",
+      "href": "https://marketplace.visualstudio.com/items?itemName=maurice-v.sqltools-driver-netezza",
+      "description": "Latest version"
+    }
+  ]
 }

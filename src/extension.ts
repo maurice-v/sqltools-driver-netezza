@@ -21,7 +21,7 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
     vscode.commands.registerCommand('sqltools.driver.netezza.showCreateTable', async (treeItem: any) => {
       try {
         if (!treeItem) {
-          vscode.window.showErrorMessage('Please select a table or view');
+          void vscode.window.showErrorMessage('Please select a table or view');
           return;
         }
 
@@ -29,7 +29,7 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
         const connId = table.conn || table.connectionId;
         
         if (!connId) {
-          vscode.window.showErrorMessage('No active connection found. Please connect to the database first.');
+          void vscode.window.showErrorMessage('No active connection found. Please connect to the database first.');
           return;
         }
         
@@ -82,13 +82,12 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
             content: ddl,
             language: 'sql'
           });
-          
           await vscode.window.showTextDocument(doc);
         } else {
-          vscode.window.showWarningMessage('No DDL could be generated for this table');
+          void vscode.window.showWarningMessage('No DDL could be generated for this table');
         }
       } catch (error: any) {
-        vscode.window.showErrorMessage(`Failed to generate DDL: ${error.message || error}`);
+        void vscode.window.showErrorMessage(`Failed to generate DDL: ${error.message || error}`);
       }
     })
   );
