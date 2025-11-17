@@ -92,6 +92,11 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
 
     this.netezzaConnection = conn;
     this.connection = Promise.resolve(conn);
+    
+    // Set the current catalog to the connection's database
+    this.currentCatalog = this.credentials.database;
+    console.log(`[Netezza Driver] Connection opened. Current catalog: ${this.currentCatalog}`);
+    
     return this.connection;
   }
 
@@ -727,6 +732,18 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
    * Executes a user-provided query from the editor
    */
   public async runSingleQuery(query: string): Promise<NSDatabase.IResult> {
+    // Reset to the connection's default database before executing user queries
+    // This ensures user queries aren't affected by catalog changes from tree expansion
+    if (this.credentials.database && this.currentCatalog !== this.credentials.database) {
+      try {
+        await this.query(`SET CATALOG ${this.credentials.database}`);
+        this.currentCatalog = this.credentials.database;
+        console.log(`[Netezza Driver] Reset catalog to ${this.credentials.database} for user query`);
+      } catch (err) {
+        console.warn('[Netezza Driver] Failed to reset catalog, continuing with current catalog:', err);
+      }
+    }
+    
     const results = await this.query(query);
     return results[0];
   }

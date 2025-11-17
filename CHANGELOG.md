@@ -2,6 +2,12 @@
 
 All notable changes to the SQLTools Netezza Driver will be documented in this file.
 
+## [1.1.1] - 2025-11-17
+
+### Fixed
+- Fixed query execution failure when database/schema is expanded in tree view
+- Query context now properly resets to connection default database before execution
+
 ## [1.0.1] - 2025-11-14
 
 ### Fixed
