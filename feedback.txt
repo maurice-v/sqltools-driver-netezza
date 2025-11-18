@@ -1,0 +1,253 @@
+maurice-v: lets debug splitting so that SQLTools recognizes each semicolon-terminated statement as a separate query. This will allow the "Run on active query" feature to work for each individual statement.
+
+sqlfile:
+select current_date;
+
+SELECT current_timestamp;
+
+selecting:
+SELECT current_timestamp;
+
+delivers in the logging:
+[Netezza Driver] Executing query: select current_date;
+
+SELECT current_timestamp;
+[Netezza Driver] Query completed in 0ms
+
+if i do it without the ; is seems to work fine
+
+
+## SOLUTION IMPLEMENTED
+
+### Changes Made:
+1. **Improved the `parse()` method** in `src/ls/driver.ts`:
+   - Fixed SQL string escaping to use double quotes (`''`) instead of backslash escaping
+   - Added comprehensive logging to help debug query parsing
+   - Made the method return `Promise<string[]> | string[]` to match SQLTools expectations
+   - Enhanced comment handling (line and block comments)
+
+2. **Key improvements**:
+   - Properly handles SQL string literals with escaped quotes
+   - Correctly identifies semicolons that are statement terminators vs those in strings/comments
+   - Added debug logging to show how many queries were parsed
+
+### How It Works:
+- The `identifyStatements = true` flag tells SQLTools to use the `parse()` method
+- The `parse()` method splits the input text into separate queries based on semicolons
+- SQLTools uses the cursor position to determine which parsed query to execute
+- Only the query containing the cursor is sent to the `query()` method for execution
+
+### Testing:
+1. Open `debug-queries.sql`
+2. Place cursor on any query
+3. Execute "Run on active connection"
+4. Only that query should execute
+
+### Expected Behavior:
+- Cursor on line 4 (`select current_date;`) → executes only Query 1
+- Cursor on line 7 (`SELECT current_timestamp;`) → executes only Query 2
+- Cursor on line 10 (`SELECT current_user;`) → executes only Query 3
+
+The parse() method now correctly:
+- ✅ Handles semicolons in strings: `SELECT 'text; with semicolon'`
+- ✅ Handles line comments: `-- comment with ; semicolon`
+- ✅ Handles block comments: `/* comment with ; semicolon */`
+- ✅ Handles escaped quotes: `SELECT 'can''t' AS text`
+- ✅ Returns each query with its terminating semicolon
+
+GitHub Copilot: Looking at your issue, it seems the query splitting logic isn't working correctly - it's sending both queries instead of just the one where your cursor is positioned. Let's debug and fix the query splitting implementation.
+
+The problem is likely in the `query.ts` file where queries are parsed and split. Here's the fix:
+
+````typescript
+// ...existing code...
+
+export function splitQueries(query: string): string[] {
+  if (!query || !query.trim()) {
+    return [];
+  }
+
+  const queries: string[] = [];
+  let currentQuery = '';
+  let inString = false;
+  let stringChar = '';
+  let inLineComment = false;
+  let inBlockComment = false;
+  let i = 0;
+
+  while (i < query.length) {
+    const char = query[i];
+    const nextChar = query[i + 1] || '';
+    const prevChar = query[i - 1] || '';
+
+    // Handle line comments
+    if (!inString && !inBlockComment && char === '-' && nextChar === '-') {
+      inLineComment = true;
+      currentQuery += char;
+      i++;
+      continue;
+    }
+
+    // End line comment at newline
+    if (inLineComment && (char === '\n' || char === '\r')) {
+      inLineComment = false;
+      currentQuery += char;
+      i++;
+      continue;
+    }
+
+    // Handle block comments
+    if (!inString && !inLineComment && char === '/' && nextChar === '*') {
+      inBlockComment = true;
+      currentQuery += char;
+      i++;
+      continue;
+    }
+
+    // End block comment
+    if (inBlockComment && char === '*' && nextChar === '/') {
+      inBlockComment = false;
+      currentQuery += char + nextChar;
+      i += 2;
+      continue;
+    }
+
+    // Skip everything in comments
+    if (inLineComment || inBlockComment) {
+      currentQuery += char;
+      i++;
+      continue;
+    }
+
+    // Handle string literals
+    if (!inString && (char === "'" || char === '"')) {
+      inString = true;
+      stringChar = char;
+      currentQuery += char;
+      i++;
+      continue;
+    }
+
+    // End string (check for escaped quotes)
+    if (inString && char === stringChar) {
+      // Check if it's an escaped quote (two consecutive quotes)
+      if (nextChar === stringChar) {
+        currentQuery += char + nextChar;
+        i += 2;
+        continue;
+      }
+      inString = false;
+      stringChar = '';
+      currentQuery += char;
+      i++;
+      continue;
+    }
+
+    // Handle semicolon (query separator)
+    if (!inString && !inLineComment && !inBlockComment && char === ';') {
+      currentQuery += char;
+      const trimmed = currentQuery.trim();
+      if (trimmed) {
+        queries.push(trimmed);
+      }
+      currentQuery = '';
+      i++;
+      continue;
+    }
+
+    currentQuery += char;
+    i++;
+  }
+
+  // Add the last query if it exists (even without semicolon)
+  const trimmed = currentQuery.trim();
+  if (trimmed) {
+    queries.push(trimmed);
+  }
+
+  return queries;
+}
+
+export function getQueryAtCursor(query: string, cursorOffset: number): string {
+  const queries = splitQueries(query);
+  let currentOffset = 0;
+
+  for (const q of queries) {
+    // Find the query position in the original text
+    const queryStart = query.indexOf(q, currentOffset);
+    const queryEnd = queryStart + q.length;
+    
+    if (cursorOffset >= queryStart && cursorOffset <= queryEnd) {
+      return q;
+    }
+    
+    currentOffset = queryEnd;
+  }
+
+  // If no query found at cursor, return the whole query (fallback)
+  return query;
+}
+
+// ...existing code...
+````
+
+Also, make sure the driver's `query` method is using this logic correctly:
+
+````typescript
+// ...existing code...
+import { splitQueries, getQueryAtCursor } from './query';
+
+// ...existing code...
+
+public async query(
+  queries: string,
+  opt: IQueryOptions = {}
+): Promise<NSDatabase.IResult[]> {
+  const { requestId, connectionId } = opt;
+
+  // If we have cursor position, get only the query at cursor
+  if (opt.cursorOffset !== undefined && opt.cursorOffset >= 0) {
+    const singleQuery = getQueryAtCursor(queries, opt.cursorOffset);
+    queries = singleQuery;
+    console.log(`[Netezza Driver] Query at cursor: ${singleQuery}`);
+  }
+
+  console.log(`[Netezza Driver] Executing query: ${queries}`);
+  
+  // Split queries if needed
+  const queryList = splitQueries(queries);
+  const results: NSDatabase.IResult[] = [];
+
+  for (const query of queryList) {
+    if (!query.trim()) continue;
+    
+    const startTime = Date.now();
+    const result = await this.queryConnection(connectionId, query, opt);
+    const endTime = Date.now();
+    
+    console.log(`[Netezza Driver] Query completed in ${endTime - startTime}ms`);
+    results.push(result);
+  }
+
+  return results;
+}
+
+// ...existing code...
+````
+
+The key changes are:
+1. **Proper query splitting**: The `splitQueries` function correctly handles semicolons, strings, and comments
+2. **Cursor position detection**: The `getQueryAtCursor` function finds which query the cursor is in
+3. **Driver integration**: The driver uses cursor position to execute only the active query
+
+This should fix the issue where both queries were being executed when you had your cursor in the second query.
+
+maurice-v: are you done: The key?
+
+GitHub Copilot: Yes, I'm done. The key points for fixing the multi-statement query execution are:
+
+1. **Proper query splitting**: The `splitQueries` function correctly handles semicolons, strings, and comments
+2. **Cursor position detection**: The `getQueryAtCursor` function finds which query the cursor is in
+3. **Driver integration**: The driver uses cursor position to execute only the active query
+
+These changes should resolve the issue where selecting `SELECT current_timestamp;` was executing both queries instead of just the selected one.

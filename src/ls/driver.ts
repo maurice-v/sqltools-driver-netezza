@@ -34,6 +34,11 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
     exportData: true
   } as const;
 
+  /**
+   * Query parsing configuration for SQLTools
+   */
+  public readonly identifyStatements = true;
+
   private currentCatalog: string | null = null;
   private queryTimeout = 30000; // Default 30 seconds
   private netezzaConnection: NetezzaConnection | null = null;
@@ -120,12 +125,12 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
     }
   }
 
-  private async queryWithTimeout(query: string, timeoutMs: number): Promise<NSDatabase.IResult[]> {
+  private async queryWithTimeout(query: string, timeoutMs: number, queryInfo?: { index: number; total: number }): Promise<NSDatabase.IResult[]> {
     // Serialize queries to prevent parallel execution issues on Netezza
     return new Promise((resolve, reject) => {
       this.queryQueue = this.queryQueue.then(async () => {
         try {
-          const result = await this.executeQueryInternal(query, timeoutMs);
+          const result = await this.executeQueryInternal(query, timeoutMs, queryInfo);
           resolve(result);
         } catch (err) {
           reject(err);
@@ -136,8 +141,12 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
     });
   }
 
-  private async executeQueryInternal(query: string, timeoutMs: number): Promise<NSDatabase.IResult[]> {
+  private async executeQueryInternal(query: string, timeoutMs: number, queryInfo?: { index: number; total: number }): Promise<NSDatabase.IResult[]> {
     const conn = await this.open();
+
+    const queryPreview = query.replace(/\s+/g, ' ').trim().substring(0, 50);
+    console.log('[Netezza Driver] Executing query:', query);
+    const startTime = Date.now();
 
     try {
       // Create timeout promise
@@ -152,6 +161,9 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       this.runningQueries.add(queryPromise);
       const data = await Promise.race([queryPromise, timeoutPromise]);
       this.runningQueries.delete(queryPromise);
+      
+      const elapsedTime = Date.now() - startTime;
+      console.log(`[Netezza Driver] Query completed in ${elapsedTime}ms`);
       
       if (!data) {
         return [];
@@ -181,6 +193,17 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       }
 
       const messages: string[] = [];
+      
+      // Add query execution info if provided (for multi-query execution)
+      if (queryInfo) {
+        messages.push(`Executing query ${queryInfo.index} of ${queryInfo.total}: ${queryPreview}${query.length > 50 ? '...' : ''}`);
+      } else {
+        // For single query execution, show the query preview
+        messages.push(`Executing: ${queryPreview}${query.length > 50 ? '...' : ''}`);
+      }
+      
+      // Add execution time message
+      messages.push(`Query completed in ${elapsedTime}ms`);
       
       // Limit rows to prevent UI hang with large result sets
       // Use SQLTools pageSize and limit from connection settings
@@ -212,15 +235,29 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
 
       return [result];
     } catch (err: any) {
+      const elapsedTime = Date.now() - startTime;
+      console.log(`[Netezza Driver] Query failed after ${elapsedTime}ms:`, err.message);
+      
+      const messages: string[] = [];
+      
+      // Add query execution info
+      if (queryInfo) {
+        messages.push(`Executing query ${queryInfo.index} of ${queryInfo.total}: ${queryPreview}${query.length > 50 ? '...' : ''}`);
+      } else {
+        messages.push(`Executing: ${queryPreview}${query.length > 50 ? '...' : ''}`);
+      }
+      
+      messages.push(err.message && err.message.includes('timeout') 
+        ? `Query execution timeout (${timeoutMs}ms). The query took too long to complete.`
+        : `Error: ${err.message || err}`);
+      
       // Return error in SQLTools result format instead of throwing
       const errorResult: NSDatabase.IResult = {
         connId: this.getId(),
         requestId: query,
         resultId: generateId(),
         cols: ['error'],
-        messages: [err.message && err.message.includes('timeout') 
-          ? `Query execution timeout (${timeoutMs}ms). The query took too long to complete.`
-          : `Error: ${err.message || err}`],
+        messages: messages,
         error: true,  // Mark as error
         rawError: err,
         query: query,
@@ -232,8 +269,58 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
 
   /**
    * Executes a SQL query with the configured timeout
+   * When multiple statements are detected, they are executed sequentially.
    */
   public async query(query: string, opt: any = {}): Promise<NSDatabase.IResult[]> {
+    // Log what we received to understand what SQLTools is sending
+    console.log('[Netezza Driver] query() called with:');
+    console.log('  Query length:', query.length);
+    console.log('  Query preview:', JSON.stringify(query.substring(0, 100)));
+    console.log('  Options:', JSON.stringify(opt));
+    
+    // Parse the query to check if it contains multiple statements
+    const parsedQueries = await Promise.resolve(this.parse(query));
+    console.log(`[Netezza Driver] Parsed ${parsedQueries.length} query/queries`);
+    
+    // If we have multiple queries, execute them sequentially and return all results
+    if (parsedQueries.length > 1) {
+      console.log(`[Netezza Driver] Executing ${parsedQueries.length} queries sequentially`);
+      const allResults: NSDatabase.IResult[] = [];
+      const overallStartTime = Date.now();
+      
+      for (let i = 0; i < parsedQueries.length; i++) {
+        const queryText = parsedQueries[i];
+        console.log(`[Netezza Driver] Executing query ${i + 1} of ${parsedQueries.length}`);
+        
+        try {
+          const results = await this.queryWithTimeout(queryText, this.queryTimeout, { 
+            index: i + 1, 
+            total: parsedQueries.length 
+          });
+          allResults.push(...results);
+        } catch (err: any) {
+          console.error(`[Netezza Driver] Query ${i + 1} failed:`, err);
+          // Error already formatted by executeQueryInternal, just continue
+        }
+      }
+      
+      const totalElapsedTime = Date.now() - overallStartTime;
+      
+      // Add summary message to the last result
+      if (allResults.length > 0) {
+        const lastResult = allResults[allResults.length - 1];
+        const existingMessages = lastResult.messages || [];
+        lastResult.messages = [
+          ...existingMessages,
+          `─────────────────────────────────────────`,
+          `Total execution time for ${parsedQueries.length} queries: ${totalElapsedTime}ms`
+        ];
+      }
+      
+      return allResults;
+    }
+    
+    // Execute single query
     return this.queryWithTimeout(query, this.queryTimeout);
   }
 
@@ -273,6 +360,102 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       console.warn('[Netezza Driver] Version query failed, falling back to simple test', err);
       await this.query('SELECT 1 AS result');
     }
+  }
+
+  /**
+   * Parses SQL text and identifies individual query boundaries
+   * This allows SQLTools to recognize each semicolon-terminated statement
+   * as a separate executable query
+   */
+  public parse(query: string, driver?: string): Promise<string[]> | string[] {
+    console.log(`[Netezza Driver] Parsing query with length: ${query.length}`);
+    
+    // Split by semicolons but handle strings and comments
+    const queries: string[] = [];
+    let currentQuery = '';
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    let inLineComment = false;
+    let inBlockComment = false;
+    
+    for (let i = 0; i < query.length; i++) {
+      const char = query[i];
+      const nextChar = i + 1 < query.length ? query[i + 1] : '';
+      const prevChar = i > 0 ? query[i - 1] : '';
+      
+      // Handle line comments (-- )
+      if (!inSingleQuote && !inDoubleQuote && !inBlockComment && char === '-' && nextChar === '-') {
+        inLineComment = true;
+        currentQuery += char;
+        continue;
+      }
+      
+      // End line comment on newline
+      if (inLineComment && char === '\n') {
+        inLineComment = false;
+        currentQuery += char;
+        continue;
+      }
+      
+      // Handle block comments (/* */)
+      if (!inSingleQuote && !inDoubleQuote && !inLineComment && char === '/' && nextChar === '*') {
+        inBlockComment = true;
+        currentQuery += char;
+        continue;
+      }
+      
+      if (inBlockComment && char === '*' && nextChar === '/') {
+        inBlockComment = false;
+        currentQuery += char + nextChar;
+        i++; // Skip next character
+        continue;
+      }
+      
+      // Handle string literals with proper escaping
+      if (!inLineComment && !inBlockComment) {
+        if (char === "'" && !inDoubleQuote) {
+          // Check for escaped single quote (two consecutive single quotes)
+          if (inSingleQuote && nextChar === "'") {
+            currentQuery += char + nextChar;
+            i++; // Skip next character
+            continue;
+          }
+          inSingleQuote = !inSingleQuote;
+        } else if (char === '"' && !inSingleQuote) {
+          // Check for escaped double quote
+          if (inDoubleQuote && nextChar === '"') {
+            currentQuery += char + nextChar;
+            i++; // Skip next character
+            continue;
+          }
+          inDoubleQuote = !inDoubleQuote;
+        }
+      }
+      
+      // Check for semicolon (statement terminator)
+      if (char === ';' && !inSingleQuote && !inDoubleQuote && !inLineComment && !inBlockComment) {
+        currentQuery += char;
+        const trimmedQuery = currentQuery.trim();
+        if (trimmedQuery.length > 0) {
+          console.log(`[Netezza Driver] Found query: ${trimmedQuery.substring(0, 50)}...`);
+          queries.push(trimmedQuery);
+        }
+        currentQuery = '';
+        continue;
+      }
+      
+      currentQuery += char;
+    }
+    
+    // Add any remaining query without semicolon
+    const trimmedQuery = currentQuery.trim();
+    if (trimmedQuery.length > 0) {
+      console.log(`[Netezza Driver] Found query (no semicolon): ${trimmedQuery.substring(0, 50)}...`);
+      queries.push(trimmedQuery);
+    }
+    
+    console.log(`[Netezza Driver] Parsed ${queries.length} query/queries`);
+    return queries.length > 0 ? queries : [query];
   }
 
   public async getChildrenForItem({ item, parent }: Arg0<IConnectionDriver['getChildrenForItem']>) {
@@ -732,19 +915,22 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
    * Executes a user-provided query from the editor
    */
   public async runSingleQuery(query: string): Promise<NSDatabase.IResult> {
-    // Reset to the connection's default database before executing user queries
-    // This ensures user queries aren't affected by catalog changes from tree expansion
-    if (this.credentials.database && this.currentCatalog !== this.credentials.database) {
-      try {
-        await this.query(`SET CATALOG ${this.credentials.database}`);
-        this.currentCatalog = this.credentials.database;
-        console.log(`[Netezza Driver] Reset catalog to ${this.credentials.database} for user query`);
-      } catch (err) {
-        console.warn('[Netezza Driver] Failed to reset catalog, continuing with current catalog:', err);
-      }
+    // Use the current catalog (last expanded in object browser) for user queries
+    // This allows queries to run in the context of the database being explored
+    let catalogMessage = '';
+    if (this.currentCatalog) {
+      catalogMessage = `Executing query in catalog: ${this.currentCatalog}`;
+      console.log(`[Netezza Driver] ${catalogMessage}`);
     }
     
     const results = await this.query(query);
+    
+    // Add catalog context message to the result
+    if (catalogMessage && results[0]) {
+      results[0].messages = results[0].messages || [];
+      results[0].messages.unshift(catalogMessage);
+    }
+    
     return results[0];
   }
 

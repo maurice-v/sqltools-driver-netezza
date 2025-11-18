@@ -2,7 +2,7 @@
   "name": "sqltools-driver-netezza",
   "displayName": "SQLTools Netezza Driver",
   "description": "SQLTools driver for Netezza using node-netezza",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "publisher": "maurice-v",
   "author": {
     "name": "maurice-v"
@@ -44,6 +44,19 @@
         "command": "sqltools.driver.netezza.showCreateTable",
         "title": "Generate CREATE Script",
         "category": "SQLTools Netezza"
+      },
+      {
+        "command": "sqltools.driver.netezza.executeQueryAtCursor",
+        "title": "Execute Query at Cursor",
+        "category": "SQLTools Netezza"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "sqltools.driver.netezza.executeQueryAtCursor",
+        "key": "ctrl+alt+e",
+        "mac": "cmd+alt+e",
+        "when": "editorTextFocus && editorLangId == sql"
       }
     ],
     "menus": {
@@ -52,6 +65,13 @@
           "command": "sqltools.driver.netezza.showCreateTable",
           "when": "viewItem =~ /^connection\\.(table|view)\\b/",
           "group": "navigation@100"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "sqltools.driver.netezza.executeQueryAtCursor",
+          "when": "editorLangId == sql",
+          "group": "sqltools@1"
         }
       ]
     },

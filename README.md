@@ -10,6 +10,8 @@ A Visual Studio Code extension that adds Netezza database support to [SQLTools](
 - Autocomplete for database objects
 - View table data
 - Format SQL queries
+- **Multi-statement support**: Write multiple queries in one file, separated by semicolons
+- **Smart query parsing**: Execute individual queries by placing cursor on them
 
 ## Installation
 
@@ -67,6 +69,8 @@ Create a new SQLTools connection with the following parameters:
 
 - ✅ Connection management
 - ✅ Query execution
+- ✅ Multi-statement files (semicolon-separated queries)
+- ✅ Smart query identification ("Run on active query")
 - ✅ Database browsing
 - ✅ Schema browsing
 - ✅ Table browsing
