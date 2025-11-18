@@ -261,9 +261,36 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       // Add execution time
       messages.push(`Elapsed time: ${elapsedTime}ms`);
       
-      messages.push(err.message && err.message.includes('timeout') 
-        ? `Query execution timeout (${timeoutMs}ms). The query took too long to complete.`
-        : `Error: ${err.message || err}`);
+      // Add prominent error marker
+      messages.push(`═══════════════════════════════════════════`);
+      messages.push(`❌ QUERY FAILED`);
+      messages.push(`═══════════════════════════════════════════`);
+      
+      // Add detailed error information
+      if (err.message && err.message.includes('timeout')) {
+        messages.push(`Error Type: Query Timeout`);
+        messages.push(`Details: Query execution exceeded the timeout limit of ${timeoutMs}ms`);
+        messages.push(`Suggestion: Consider optimizing the query or increasing the timeout setting`);
+      } else {
+        messages.push(`Error: ${err.message || err}`);
+        
+        // Add additional error details if available (Netezza-specific)
+        if (err.code) {
+          messages.push(`Error Code: ${err.code}`);
+        }
+        if (err.detail) {
+          messages.push(`Details: ${err.detail}`);
+        }
+        if (err.hint) {
+          messages.push(`Hint: ${err.hint}`);
+        }
+        if (err.position) {
+          messages.push(`Position: ${err.position}`);
+        }
+        if (err.where) {
+          messages.push(`Where: ${err.where}`);
+        }
+      }
       
       // Return error in SQLTools result format instead of throwing
       const errorResult: NSDatabase.IResult = {
@@ -306,16 +333,13 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
         const queryText = parsedQueries[i];
         console.log(`[Netezza Driver] Executing query ${i + 1} of ${parsedQueries.length}`);
         
-        try {
-          const results = await this.queryWithTimeout(queryText, this.queryTimeout, { 
-            index: i + 1, 
-            total: parsedQueries.length 
-          });
-          allResults.push(...results);
-        } catch (err: any) {
-          console.error(`[Netezza Driver] Query ${i + 1} failed:`, err);
-          // Error already formatted by executeQueryInternal, just continue
-        }
+        // executeQueryInternal always returns results, even for errors
+        // No need for try-catch here since errors are returned as error result objects
+        const results = await this.queryWithTimeout(queryText, this.queryTimeout, { 
+          index: i + 1, 
+          total: parsedQueries.length 
+        });
+        allResults.push(...results);
       }
       
       const totalElapsedTime = Date.now() - overallStartTime;

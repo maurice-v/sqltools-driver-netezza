@@ -9,3 +9,10 @@ SELECT current_timestamp;
 
 -- Query 3
 SELECT current_user;
+
+
+--query 4
+SELECT * 
+FROM (
+    SELECT current_user
+)

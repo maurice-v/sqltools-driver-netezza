@@ -2,6 +2,21 @@
 
 All notable changes to the SQLTools Netezza Driver will be documented in this file.
 
+## [1.2.2] - 2025-11-18
+
+### Added
+- Enhanced error messages displayed in SQL console with visual formatting and detailed error information
+- Error results now include error code, details, hints, and position when available
+
+### Fixed
+- Fixed Ctrl+Enter keyboard shortcut to work with both selected text and cursor position
+- Fixed error handling in multi-query execution to display all errors in console
+- Fixed "Execute Query" to properly pass query text directly to SQLTools
+
+### Changed
+- Simplified context menu with single "Execute Query" option that handles all scenarios
+- Removed redundant context menu items in favor of unified query execution
+
 ## [1.2.1] - 2025-11-18
 
 ### Added

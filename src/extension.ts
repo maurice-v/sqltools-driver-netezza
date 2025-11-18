@@ -185,25 +185,25 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
       
       // If called from CodeLens with queryInfo, use that
       if (queryInfo) {
-        const startPos = document.positionAt(queryInfo.startOffset);
-        const endPos = document.positionAt(queryInfo.endOffset);
-        editor.selection = new vscode.Selection(startPos, endPos);
-        
+        console.log(`[Netezza Extension] Executing query from CodeLens: ${queryInfo.query.substring(0, 50)}...`);
         try {
-          await vscode.commands.executeCommand('sqltools.executeQuery');
+          await vscode.commands.executeCommand('sqltools.executeQuery', queryInfo.query);
         } catch (error: any) {
           void vscode.window.showErrorMessage(`Failed to execute query: ${error.message || error}`);
         }
         return;
       }
       
-      // If user has a selection, use it directly
+      // If user has a selection, execute the selected text
       if (!selection.isEmpty) {
         const selectedText = document.getText(selection).trim();
         if (selectedText) {
-          console.log(`[Netezza Extension] Using user selection: ${selectedText.substring(0, 50)}...`);
-          // Keep the existing selection and execute
-          await vscode.commands.executeCommand('sqltools.executeQuery');
+          console.log(`[Netezza Extension] Executing selected text: ${selectedText.substring(0, 50)}...`);
+          try {
+            await vscode.commands.executeCommand('sqltools.executeQuery', selectedText);
+          } catch (error: any) {
+            void vscode.window.showErrorMessage(`Failed to execute query: ${error.message || error}`);
+          }
           return;
         }
       }
@@ -236,16 +236,51 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
         console.log(`[Netezza Extension] Cursor not in query, using first query`);
       }
       
-      // Select the query text in the editor so SQLTools will execute only that
-      const startPos = document.positionAt(targetQueryInfo.startOffset);
-      const endPos = document.positionAt(targetQueryInfo.endOffset);
-      editor.selection = new vscode.Selection(startPos, endPos);
+      // Execute the query by passing it directly to SQLTools
+      try {
+        await vscode.commands.executeCommand('sqltools.executeQuery', targetQueryInfo.query);
+      } catch (error: any) {
+        void vscode.window.showErrorMessage(`Failed to execute query: ${error.message || error}`);
+      }
+    })
+  );
+
+  // Register command to execute selected text directly (without query parsing)
+  extContext.subscriptions.push(
+    vscode.commands.registerCommand('sqltools.driver.netezza.executeSelectedText', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        void vscode.window.showErrorMessage('No active editor');
+        return;
+      }
+
+      const document = editor.document;
+      if (document.languageId !== 'sql') {
+        void vscode.window.showWarningMessage('This command only works in SQL files');
+        return;
+      }
+
+      const selection = editor.selection;
       
-      // Execute using SQLTools' executeQuery command which respects selection
+      // Check if user has a selection
+      if (selection.isEmpty) {
+        void vscode.window.showWarningMessage('Please select the text you want to execute');
+        return;
+      }
+      
+      const selectedText = document.getText(selection).trim();
+      if (!selectedText) {
+        void vscode.window.showWarningMessage('Selected text is empty');
+        return;
+      }
+      
+      console.log(`[Netezza Extension] Executing selected text: ${selectedText.substring(0, 50)}...`);
+      
+      // Execute the selected text directly without any parsing
       try {
         await vscode.commands.executeCommand('sqltools.executeQuery');
       } catch (error: any) {
-        void vscode.window.showErrorMessage(`Failed to execute query: ${error.message || error}`);
+        void vscode.window.showErrorMessage(`Failed to execute selected text: ${error.message || error}`);
       }
     })
   );
