@@ -250,6 +250,44 @@ export async function activate(extContext: ExtensionContext): Promise<IDriverExt
     })
   );
 
+  // Register the "Set as Current Catalog" command
+  extContext.subscriptions.push(
+    vscode.commands.registerCommand('sqltools.driver.netezza.setCatalog', async (treeItem: any) => {
+      try {
+        if (!treeItem) {
+          void vscode.window.showErrorMessage('Please select a database/catalog');
+          return;
+        }
+
+        const database = treeItem;
+        const connId = database.conn || database.connectionId;
+        
+        if (!connId) {
+          void vscode.window.showErrorMessage('No active connection found. Please connect to the database first.');
+          return;
+        }
+        
+        // Extract the catalog name
+        const catalogName = database.database || database.label;
+        
+        if (!catalogName) {
+          void vscode.window.showErrorMessage('Could not determine catalog name');
+          return;
+        }
+        
+        // Generate the SET CATALOG query
+        const query = (queries as any).setCatalog(catalogName);
+        
+        // Execute query through SQLTools
+        await vscode.commands.executeCommand('sqltools.executeQuery', query, connId);
+        
+        void vscode.window.showInformationMessage(`Catalog set to: ${catalogName}`);
+      } catch (error: any) {
+        void vscode.window.showErrorMessage(`Failed to set catalog: ${error.message || error}`);
+      }
+    })
+  );
+
   // Register the "Generate CREATE Script" command
   extContext.subscriptions.push(
     vscode.commands.registerCommand('sqltools.driver.netezza.showCreateTable', async (treeItem: any) => {

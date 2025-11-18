@@ -147,6 +147,14 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
     const queryPreview = query.replace(/\s+/g, ' ').trim().substring(0, 50);
     console.log('[Netezza Driver] Executing query:', query);
     const startTime = Date.now();
+    
+    // Check if this is a SET CATALOG statement and update currentCatalog
+    const setCatalogMatch = query.trim().match(/^SET\s+CATALOG\s+(\w+)/i);
+    if (setCatalogMatch) {
+      const newCatalog = setCatalogMatch[1];
+      console.log(`[Netezza Driver] Detected SET CATALOG, updating currentCatalog to: ${newCatalog}`);
+      this.currentCatalog = newCatalog;
+    }
 
     try {
       // Create timeout promise
@@ -474,9 +482,8 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
         return databases;
       case ContextValue.DATABASE:
         const dbName = (item as NSDatabase.IDatabase).database;
-        console.log(`[Netezza Driver] Switching to database: ${dbName}`);
-        await this.query(`SET CATALOG ${dbName}`);
-        this.currentCatalog = dbName;
+        console.log(`[Netezza Driver] Fetching schemas for database: ${dbName}`);
+        // Note: Not changing currentCatalog - user must explicitly use "Set as Current Catalog" command
         const schemas = await this.executeQuery(this.queries.fetchSchemas);
         console.log(`[Netezza Driver] Loaded ${schemas.length} schema(s)`);
         return schemas;
@@ -507,11 +514,6 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       case ContextValue.VIEW:
         const table = item as NSDatabase.ITable;
         const tableType = item.type === ContextValue.TABLE ? 'table' : 'view';
-        
-        if (table.database) {
-          await this.query(`SET CATALOG ${table.database}`);
-          this.currentCatalog = table.database;
-        }
         
         console.log(`[Netezza Driver] Fetching columns for ${tableType}: ${table.schema}.${table.label}`);
         const columns = await this.executeQuery(this.queries.fetchColumns, table);

@@ -17,6 +17,13 @@ function escapeTableName(table: any): string {
 }
 
 /**
+ * Generates a SET CATALOG statement for switching the current catalog/database
+ */
+export function generateSetCatalogQuery(catalog: string): string {
+  return `SET CATALOG ${catalog};`;
+}
+
+/**
  * SQL queries for interacting with Netezza database metadata
  * Uses Netezza system views (_V_*) to retrieve schema information
  */
@@ -329,7 +336,8 @@ LEFT JOIN org_cols
     ON table_cols.SCHEMA = org_cols.SCHEMA
     AND table_cols.TABLENAME = org_cols.TABLENAME
 `;
-  }
+  },
+  setCatalog: generateSetCatalogQuery
 };
 
 export default queries;

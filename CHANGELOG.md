@@ -2,6 +2,15 @@
 
 All notable changes to the SQLTools Netezza Driver will be documented in this file.
 
+## [1.2.1] - 2025-11-18
+
+### Added
+- **Set as Current Catalog**: Right-click context menu option on database nodes to switch current catalog
+- **Automatic catalog tracking**: Driver now detects and tracks `SET CATALOG` statements to maintain session state
+
+### Fixed
+- Fixed `SET CATALOG` syntax (removed quotes around catalog name)
+
 ## [1.2.0] - 2025-11-18
 
 ### Added
