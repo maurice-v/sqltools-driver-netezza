@@ -194,16 +194,17 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
 
       const messages: string[] = [];
       
-      // Add query execution info if provided (for multi-query execution)
-      if (queryInfo) {
-        messages.push(`Executing query ${queryInfo.index} of ${queryInfo.total}: ${queryPreview}${query.length > 50 ? '...' : ''}`);
-      } else {
-        // For single query execution, show the query preview
-        messages.push(`Executing: ${queryPreview}${query.length > 50 ? '...' : ''}`);
+      // Add current catalog/database
+      if (this.currentCatalog) {
+        messages.push(`Database: ${this.currentCatalog}`);
       }
       
+      // Add the full executed query (normalize whitespace for display)
+      const normalizedQuery = query.replace(/\s+/g, ' ').trim();
+      messages.push(`Query: ${normalizedQuery}`);
+      
       // Add execution time message
-      messages.push(`Query completed in ${elapsedTime}ms`);
+      messages.push(`Elapsed time: ${elapsedTime}ms`);
       
       // Limit rows to prevent UI hang with large result sets
       // Use SQLTools pageSize and limit from connection settings
@@ -240,12 +241,17 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       
       const messages: string[] = [];
       
-      // Add query execution info
-      if (queryInfo) {
-        messages.push(`Executing query ${queryInfo.index} of ${queryInfo.total}: ${queryPreview}${query.length > 50 ? '...' : ''}`);
-      } else {
-        messages.push(`Executing: ${queryPreview}${query.length > 50 ? '...' : ''}`);
+      // Add current catalog/database
+      if (this.currentCatalog) {
+        messages.push(`Database: ${this.currentCatalog}`);
       }
+      
+      // Add the full executed query (normalize whitespace for display)
+      const normalizedQuery = query.replace(/\s+/g, ' ').trim();
+      messages.push(`Query: ${normalizedQuery}`);
+      
+      // Add execution time
+      messages.push(`Elapsed time: ${elapsedTime}ms`);
       
       messages.push(err.message && err.message.includes('timeout') 
         ? `Query execution timeout (${timeoutMs}ms). The query took too long to complete.`
