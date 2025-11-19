@@ -37,6 +37,34 @@
           "minimum": 0,
           "default": 30,
           "description": "Maximum time in seconds to wait for a query to complete. Set to 0 for no timeout."
+        },
+        "pool": {
+          "type": "object",
+          "title": "Connection Pool Settings",
+          "description": "Configure connection pooling for better performance",
+          "properties": {
+            "min": {
+              "type": "number",
+              "title": "Minimum Connections",
+              "minimum": 1,
+              "default": 1,
+              "description": "Minimum number of connections to maintain in the pool"
+            },
+            "max": {
+              "type": "number",
+              "title": "Maximum Connections",
+              "minimum": 1,
+              "default": 5,
+              "description": "Maximum number of connections allowed in the pool"
+            },
+            "idleTimeoutMillis": {
+              "type": "number",
+              "title": "Idle Timeout (milliseconds)",
+              "minimum": 1000,
+              "default": 30000,
+              "description": "How long a connection can be idle before being closed"
+            }
+          }
         }
       }
     }

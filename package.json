@@ -2,7 +2,7 @@
   "name": "sqltools-driver-netezza",
   "displayName": "SQLTools Netezza Driver",
   "description": "SQLTools driver for Netezza using node-netezza",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "publisher": "maurice-v",
   "author": {
     "name": "maurice-v"
@@ -113,7 +113,7 @@
   "dependencies": {
     "@sqltools/base-driver": "latest",
     "@sqltools/types": "latest",
-    "node-netezza": "^1.1.0",
+    "node-netezza": "^1.2.0",
     "uuid": "^8.3.2"
   },
   "devDependencies": {

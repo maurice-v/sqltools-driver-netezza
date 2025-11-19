@@ -50,10 +50,31 @@ Create a new SQLTools connection with the following parameters:
   "password": "password",
   "netezzaOptions": {
     "secureConnection": false,
-    "queryTimeout": 30
+    "queryTimeout": 30,
+    "pool": {
+      "min": 1,
+      "max": 5,
+      "idleTimeoutMillis": 30000
+    }
   }
 }
 ```
+
+### Connection Pooling
+
+This driver uses connection pooling for improved performance and resource management. Pool options:
+
+- **min**: Minimum number of connections to maintain (default: 1)
+- **max**: Maximum number of connections (default: 5)
+- **idleTimeoutMillis**: How long a connection can be idle before closing in milliseconds (default: 30000)
+
+**Benefits:**
+- Faster query execution through connection reuse
+- Better handling of concurrent queries from multiple editor tabs
+- Automatic connection lifecycle management
+- Reduced server load and improved resource efficiency
+
+**Note:** Pool settings are optional. If not specified, the driver will use sensible defaults.
 
 ## Usage
 
@@ -68,6 +89,7 @@ Create a new SQLTools connection with the following parameters:
 ## Supported Features
 
 - ✅ Connection management
+- ✅ Connection pooling with configurable settings
 - ✅ Query execution
 - ✅ Multi-statement files (semicolon-separated queries)
 - ✅ Smart query identification ("Run on active query")

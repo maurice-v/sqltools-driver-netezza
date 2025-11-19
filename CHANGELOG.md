@@ -2,6 +2,27 @@
 
 All notable changes to the SQLTools Netezza Driver will be documented in this file.
 
+## [1.5.0] - 2025-11-19
+
+### Added
+- **Connection pooling** with configurable pool settings
+  - Improved performance through connection reuse
+  - Better handling of concurrent queries from multiple editor tabs
+  - Configurable min/max connections and idle timeout
+  - Automatic connection lifecycle management
+- Pool configuration options in connection settings
+- Automatic catalog management for pooled connections
+
+### Changed
+- Updated to node-netezza 1.2.0 with built-in Pool class
+- Enhanced connection management for better resource efficiency
+- Improved error handling with automatic connection recovery
+
+### Fixed
+- Fixed catalog state management with connection pooling (each pooled connection is set to correct catalog)
+- Fixed connection state issues after query errors (bad connections are now closed instead of returned to pool)
+- Fixed inconsistent error behavior when repeatedly executing failing queries
+
 ## [1.2.2] - 2025-11-18
 
 ### Added
