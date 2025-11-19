@@ -11,17 +11,28 @@ All notable changes to the SQLTools Netezza Driver will be documented in this fi
   - Configurable min/max connections and idle timeout
   - Automatic connection lifecycle management
 - Pool configuration options in connection settings
-- Automatic catalog management for pooled connections
+- Automatic catalog management for pooled connections (ensureCatalog method)
+- Automatic pool recreation on severe errors (timeout, connection reset)
+- Catalog state preservation across pool reconnections
 
 ### Changed
 - Updated to node-netezza 1.2.0 with built-in Pool class
 - Enhanced connection management for better resource efficiency
 - Improved error handling with automatic connection recovery
+- Query timeout configuration now updates dynamically
+- Aggressive socket destruction on query timeout for immediate response
 
 ### Fixed
+- **Critical**: Connections in bad state after errors no longer returned to pool
+- **Critical**: Query timeouts now properly close connections and recreate pool
+- **Critical**: Catalog management with pooled connections using ensureCatalog()
 - Fixed catalog state management with connection pooling (each pooled connection is set to correct catalog)
 - Fixed connection state issues after query errors (bad connections are now closed instead of returned to pool)
 - Fixed inconsistent error behavior when repeatedly executing failing queries
+- Fixed query timeout configuration not updating when already connected
+- Fixed double connection close on timeout errors
+- Fixed catalog state lost after pool recreation
+- Fixed cascading timeout errors from reusing bad connections
 
 ## [1.2.2] - 2025-11-18
 

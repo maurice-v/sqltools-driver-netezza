@@ -50,17 +50,18 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
    * Opens a connection to the Netezza database
    */
   public async open() {
+    // Always update query timeout from credentials (in case config changed)
+    if (this.credentials.netezzaOptions?.queryTimeout) {
+      this.queryTimeout = this.credentials.netezzaOptions.queryTimeout * 1000;
+      console.log(`[Netezza Driver] Query timeout configured to: ${this.queryTimeout}ms`);
+    }
+    
     if (this.connection && this.pool) {
       return this.connection;
     }
 
     this.completionsCache = null;
     console.log('[Netezza Driver] Completions cache cleared for new connection');
-
-    // Set query timeout from connection options (in seconds, convert to ms)
-    if (this.credentials.netezzaOptions?.queryTimeout) {
-      this.queryTimeout = this.credentials.netezzaOptions.queryTimeout * 1000;
-    }
     
     const poolOptions: any = {
       host: this.credentials.server,
@@ -69,7 +70,8 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       user: this.credentials.username,
       password: this.credentials.password,
       ssl: this.credentials.netezzaOptions?.secureConnection || false,
-      queryTimeout: this.credentials.netezzaOptions?.queryTimeout || 30,
+      // Note: Pool/Connection timeout is for connection establishment, NOT query timeout
+      // Query timeout is handled by our Promise.race() logic
       // Pool-specific options with defaults
       min: this.credentials.netezzaOptions?.pool?.min || 1,
       max: this.credentials.netezzaOptions?.pool?.max || 5,
@@ -85,8 +87,10 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       
       this.connection = Promise.resolve(this.pool);
       
-      // Set the current catalog to the connection's database
-      this.currentCatalog = this.credentials.database;
+      // Set the current catalog to the connection's database (only if not already set)
+      if (!this.currentCatalog) {
+        this.currentCatalog = this.credentials.database;
+      }
       console.log(`[Netezza Driver] Connection pool opened. Current catalog: ${this.currentCatalog}`);
       console.log(`[Netezza Driver] Pool configuration: min=${poolOptions.min}, max=${poolOptions.max}, idleTimeout=${poolOptions.idleTimeoutMillis}ms`);
       
@@ -211,6 +215,7 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
 
     const queryPreview = query.replace(/\s+/g, ' ').trim().substring(0, 50);
     console.log('[Netezza Driver] Executing query:', query);
+    console.log(`[Netezza Driver] Query timeout set to: ${timeoutMs}ms`);
     const startTime = Date.now();
     
     // Check if this is a SET CATALOG statement and update currentCatalog
@@ -237,11 +242,40 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       // Execute query with timeout
       const queryPromise = conn.execute(query);
       this.runningQueries.add(queryPromise);
-      const data = await Promise.race([queryPromise, timeoutPromise]);
-      this.runningQueries.delete(queryPromise);
       
-      // Release connection back to pool
-      await this.pool!.release(conn);
+      let data;
+      let timedOut = false;
+      try {
+        data = await Promise.race([queryPromise, timeoutPromise]);
+      } catch (err) {
+        // Check if it's a timeout error
+        if (err instanceof Error && err.message.includes('timeout')) {
+          timedOut = true;
+          console.log('[Netezza Driver] Query timed out, forcefully closing connection');
+          // Close the connection immediately - don't wait for graceful shutdown
+          // The query is still running on the server, we need to abort the connection
+          try {
+            // Try to destroy the socket directly for immediate closure
+            const connWithSocket = conn as any;
+            if (connWithSocket.socket) {
+              connWithSocket.socket.destroy();
+              console.log('[Netezza Driver] Socket destroyed');
+            } else {
+              await conn.close();
+            }
+          } catch (closeErr) {
+            console.error('[Netezza Driver] Error closing timed-out connection:', closeErr);
+          }
+        }
+        throw err; // Re-throw to be caught by outer catch
+      } finally {
+        this.runningQueries.delete(queryPromise);
+      }
+      
+      // Only release if we didn't timeout
+      if (!timedOut) {
+        await this.pool!.release(conn);
+      }
       
       const elapsedTime = Date.now() - startTime;
       console.log(`[Netezza Driver] Query completed in ${elapsedTime}ms`);
@@ -320,14 +354,33 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       const elapsedTime = Date.now() - startTime;
       console.log(`[Netezza Driver] Query failed after ${elapsedTime}ms:`, err.message);
       
+      // Check if this was a timeout (connection already closed) or other error
+      const isTimeout = err.message && err.message.includes('timeout');
+      
       // CRITICAL: Close the bad connection instead of returning it to pool
       // node-netezza connections become unreliable after errors
-      if (conn) {
+      // BUT: Don't close if it was a timeout - already handled above
+      if (conn && !isTimeout) {
         try {
           console.log('[Netezza Driver] Closing bad connection after error');
           await conn.close();
         } catch (closeErr) {
           console.error('[Netezza Driver] Error closing bad connection:', closeErr);
+        }
+      }
+      
+      // For severe errors (timeout or connection issues), close and recreate the pool
+      if (isTimeout || err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED') {
+        console.log('[Netezza Driver] Severe error detected, recreating connection pool');
+        try {
+          if (this.pool) {
+            await this.pool.end();
+          }
+          this.pool = null;
+          this.connection = null;
+          // Pool will be recreated on next query via open()
+        } catch (poolErr) {
+          console.error('[Netezza Driver] Error closing pool:', poolErr);
         }
       }
       
