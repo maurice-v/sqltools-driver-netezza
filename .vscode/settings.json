@@ -1,0 +1,21 @@
+{
+    "sqltools.connections": [
+        {
+            "connectionMethod": "Server and Port",
+            "previewLimit": 50,
+            "server": "netezza.ibm-maastricht.mediq.com",
+            "port": 5480,
+            "usePassword": "Save as plain text in settings",
+            "netezzaOptions": {
+                "secureConnection": false,
+                "queryTimeout": 30,
+                "maxRows": 500
+            },
+            "driver": "netezza",
+            "name": "test",
+            "database": "SYSTEM",
+            "username": "admin",
+            "password": "mA1gDMcPDjP1"
+        }
+    ]
+}

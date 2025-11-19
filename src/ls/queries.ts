@@ -168,7 +168,13 @@ const queries: IBaseQueries = {
       C.NAME, C.ATTNUM
     LIMIT ${params.limit || 100}`,
 
-  fetchSchemas: () => `
+  fetchSchemas: (params) => {
+    // If a database is specified, we need to query it directly
+    // Note: In Netezza, _V_SCHEMA doesn't have a DATABASE column,
+    // so we have to trust that CURRENT_CATALOG is set appropriately
+    // The driver will handle setting the catalog if needed
+    const database = params?.database || '';
+    return `
     SELECT 
       SCHEMA AS label,
       SCHEMA AS "schema",
@@ -179,7 +185,8 @@ const queries: IBaseQueries = {
     WHERE 
       SCHEMA NOT IN ('SYSTEM', 'DEFINITION_SCHEMA')
     ORDER BY 
-      SCHEMA`,
+      SCHEMA`;
+  },
 
   fetchDatabases: (params) => `
     SELECT 

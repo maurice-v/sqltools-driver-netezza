@@ -15,4 +15,34 @@ SELECT current_user;
 SELECT * 
 FROM (
     SELECT current_user
-)
+) x
+;
+
+--query 5
+SELECT current_date
+union ALL
+select current_date
+
+;
+
+--query 6
+select * 
+FROM 
+    (SELECT current_date
+    union ALL
+    select current_date
+
+)x
+;
+
+
+--query 7
+
+-- Test 1: Success
+SELECT current_date;
+
+-- Test 2: Error (invalid syntax)  
+SELECT * FORM invalid_table;
+
+-- Test 3: Success (should still execute)
+SELECT current_timestamp;

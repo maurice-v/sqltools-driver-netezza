@@ -142,7 +142,29 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
   }
 
   private async executeQueryInternal(query: string, timeoutMs: number, queryInfo?: { index: number; total: number }): Promise<NSDatabase.IResult[]> {
-    const conn = await this.open();
+    let conn;
+    try {
+      conn = await this.open();
+    } catch (err: any) {
+      // Connection failed - return error result
+      const errorResult: NSDatabase.IResult = {
+        connId: this.getId(),
+        requestId: query,
+        resultId: generateId(),
+        cols: ['error'],
+        messages: [
+          `═══════════════════════════════════════════`,
+          `❌ CONNECTION FAILED`,
+          `═══════════════════════════════════════════`,
+          `Error: ${err.message || err}`
+        ],
+        error: true,
+        rawError: err,
+        query: query,
+        results: []
+      };
+      return [errorResult];
+    }
 
     const queryPreview = query.replace(/\s+/g, ' ').trim().substring(0, 50);
     console.log('[Netezza Driver] Executing query:', query);
@@ -247,6 +269,15 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       const elapsedTime = Date.now() - startTime;
       console.log(`[Netezza Driver] Query failed after ${elapsedTime}ms:`, err.message);
       
+      // CRITICAL: Close the connection after an error
+      // node-netezza connections become unusable after errors
+      console.log('[Netezza Driver] Closing connection due to query error');
+      try {
+        await this.close();
+      } catch (closeErr) {
+        console.error('[Netezza Driver] Error closing connection:', closeErr);
+      }
+      
       const messages: string[] = [];
       
       // Add current catalog/database
@@ -292,6 +323,9 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
         }
       }
       
+      messages.push(`─────────────────────────────────────────`);
+      messages.push(`Connection closed. Will reconnect for next query.`);
+      
       // Return error in SQLTools result format instead of throwing
       const errorResult: NSDatabase.IResult = {
         connId: this.getId(),
@@ -318,6 +352,12 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
     console.log('  Query length:', query.length);
     console.log('  Query preview:', JSON.stringify(query.substring(0, 100)));
     console.log('  Options:', JSON.stringify(opt));
+    
+    // If query is empty, return empty result
+    if (!query || query.trim().length === 0) {
+      console.log('[Netezza Driver] Empty query received, returning empty result');
+      return [];
+    }
     
     // Parse the query to check if it contains multiple statements
     const parsedQueries = await Promise.resolve(this.parse(query));
@@ -358,7 +398,7 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       return allResults;
     }
     
-    // Execute single query
+    // Execute single query (this handles both single statements and complex queries like UNION)
     return this.queryWithTimeout(query, this.queryTimeout);
   }
 
@@ -507,8 +547,11 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       case ContextValue.DATABASE:
         const dbName = (item as NSDatabase.IDatabase).database;
         console.log(`[Netezza Driver] Fetching schemas for database: ${dbName}`);
-        // Note: Not changing currentCatalog - user must explicitly use "Set as Current Catalog" command
-        const schemas = await this.executeQuery(this.queries.fetchSchemas);
+        // Switch to the selected database before querying schemas
+        await this.queryWithTimeout(`SET CATALOG ${dbName};`, this.queryTimeout);
+        this.currentCatalog = dbName;
+        console.log(`[Netezza Driver] Set current catalog to: ${dbName}`);
+        const schemas = await this.executeQuery(this.queries.fetchSchemas, { database: dbName });
         console.log(`[Netezza Driver] Loaded ${schemas.length} schema(s)`);
         return schemas;
       case ContextValue.SCHEMA:
