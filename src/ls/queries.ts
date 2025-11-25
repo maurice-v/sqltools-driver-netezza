@@ -168,6 +168,73 @@ const queries: IBaseQueries = {
       C.NAME, C.ATTNUM
     LIMIT ${params.limit || 100}`,
 
+  searchSchemas: (params) => `
+    SELECT 
+      SCHEMA AS label, 
+      SCHEMA AS schema
+    FROM 
+      _V_SCHEMA
+    WHERE 
+      SCHEMA LIKE '%${params.search || ''}%'
+    ORDER BY 
+      SCHEMA`,
+
+  searchTablesInSchema: (params) => `
+    SELECT 
+      TABLENAME AS label, 
+      SCHEMA AS schema,
+      TABLENAME AS table_name
+    FROM 
+      _V_TABLE
+    WHERE 
+      TABLENAME LIKE '%${params.search || ''}%'
+      ${params.schemaContext ? `AND UPPER(SCHEMA) = UPPER('${params.schemaContext}')` : ''}
+    ORDER BY 
+      TABLENAME
+    LIMIT 100`,
+
+  searchViewsInSchema: (params) => `
+    SELECT 
+      VIEWNAME AS label,
+      SCHEMA AS schema,
+      VIEWNAME AS view_name
+    FROM 
+      _V_VIEW
+    WHERE 
+      VIEWNAME LIKE '%${params.search || ''}%'
+      ${params.schemaContext ? `AND UPPER(SCHEMA) = UPPER('${params.schemaContext}')` : ''}
+    ORDER BY 
+      VIEWNAME
+    LIMIT 100`,
+
+  searchColumnsInTable: (params) => `
+    SELECT 
+      ATTNAME AS label,
+      SCHEMA AS schema,
+      NAME AS table_name,
+      FORMAT_TYPE AS data_type,
+      ATTNOTNULL AS is_nullable
+    FROM 
+      _V_RELATION_COLUMN
+    WHERE 
+      ATTNAME LIKE '%${params.search || ''}%'
+      ${params.schemaFilter ? `AND UPPER(SCHEMA) = UPPER('${params.schemaFilter}')` : ''}
+      ${params.tableFilter ? `AND UPPER(NAME) = UPPER('${params.tableFilter}')` : ''}
+    ORDER BY 
+      ATTNUM
+    LIMIT 100`,
+
+  searchFunctions: (params) => `
+    SELECT 
+      FUNCTION AS label, 
+      SCHEMA AS schema
+    FROM 
+      _V_FUNCTION
+    WHERE 
+      FUNCTION LIKE '%${params.search || ''}%'
+    ORDER BY 
+      FUNCTION`,
+
   fetchSchemas: (params) => {
     // If a database is specified, we need to query it directly
     // Note: In Netezza, _V_SCHEMA doesn't have a DATABASE column,

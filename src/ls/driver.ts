@@ -1,37 +1,35 @@
 import AbstractDriver from '@sqltools/base-driver';
+import { IConnectionDriver, NSDatabase, ContextValue, Arg0 } from '@sqltools/types';
 import queries from './queries';
-import { IConnectionDriver, MConnectionExplorer, NSDatabase, ContextValue, Arg0 } from '@sqltools/types';
-import { v4 as generateId } from 'uuid';
-import { Pool } from 'node-netezza';
+import {
+  DEFAULT_QUERY_TIMEOUT_MS,
+  DEFAULT_PORT,
+  ALL_KEYWORDS,
+  ALL_FUNCTIONS,
+  DATA_TYPES,
+} from './constants';
+import {
+  CompletionsCache,
+  NetezzaDriverOptions,
+  QueryInfo,
+  NetezzaCredentials,
+} from './types';
+import { PoolManager } from './pool-manager';
+import { QueryParser } from './query-parser';
+import { ResultBuilder } from './result-builder';
+import { QueryTimeoutError } from './errors';
 
-interface CompletionsCache {
-  keywords: string[];
-  functions: string[];
-  dataTypes: string[];
-  schemas: Array<{ label: string; detail: string; type: string }>;
-  tables: any[];
-  columns: any[];
-  variables: any[];
-}
-
-interface NetezzaConnectionOptions {
-  host: string;
-  port: number;
-  database: string;
-  user: string;
-  password: string;
-  ssl?: boolean | { ca?: string | Buffer; rejectUnauthorized?: boolean };
-  [key: string]: any;
-}
-
-export default class NetezzaDriver extends AbstractDriver<any, any> implements IConnectionDriver {
+export default class NetezzaDriver
+  extends AbstractDriver<any, any>
+  implements IConnectionDriver
+{
   queries = queries;
 
   public readonly capabilities = {
     completions: true,
     formatSql: true,
     cancelQuery: true,
-    exportData: true
+    exportData: true,
   } as const;
 
   /**
@@ -39,101 +37,115 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
    */
   public readonly identifyStatements = true;
 
-  private currentCatalog: string | null = null;
-  private queryTimeout = 30000; // Default 30 seconds
-  private pool: Pool | null = null;
+  // Dependencies
+  private poolManager: PoolManager | null = null;
+  private readonly queryParser: QueryParser;
+  private resultBuilder: ResultBuilder | null = null;
+
+  // State
+  private queryTimeout: number = DEFAULT_QUERY_TIMEOUT_MS;
   private runningQueries = new Set<Promise<any>>();
   private queryQueue: Promise<any> = Promise.resolve();
   private completionsCache: CompletionsCache | null = null;
 
+  constructor(credentials: NetezzaCredentials, driverOptions?: any) {
+    super(credentials as any, driverOptions);
+    this.queryParser = new QueryParser();
+    this.initializeTimeout();
+  }
+
+  /**
+   * Initializes the query timeout from credentials
+   */
+  private initializeTimeout(): void {
+    const options = this.credentials.netezzaOptions as NetezzaDriverOptions | undefined;
+    if (options?.queryTimeout) {
+      this.queryTimeout = options.queryTimeout * 1000;
+      console.log(`[Netezza Driver] Query timeout configured to: ${this.queryTimeout}ms`);
+    }
+  }
+
+  /**
+   * Gets the current catalog
+   */
+  private get currentCatalog(): string | null {
+    return this.poolManager?.getCatalog() ?? null;
+  }
+
   /**
    * Opens a connection to the Netezza database
    */
-  public async open() {
+  public async open(): Promise<any> {
     // Always update query timeout from credentials (in case config changed)
-    if (this.credentials.netezzaOptions?.queryTimeout) {
-      this.queryTimeout = this.credentials.netezzaOptions.queryTimeout * 1000;
-      console.log(`[Netezza Driver] Query timeout configured to: ${this.queryTimeout}ms`);
-    }
-    
-    if (this.connection && this.pool) {
+    this.initializeTimeout();
+
+    if (this.connection && this.poolManager?.isInitialized) {
       return this.connection;
     }
 
     this.completionsCache = null;
     console.log('[Netezza Driver] Completions cache cleared for new connection');
-    
-    const poolOptions: any = {
-      host: this.credentials.server,
-      port: this.credentials.port || 5480,
-      database: this.credentials.database,
-      user: this.credentials.username,
-      password: this.credentials.password,
-      ssl: this.credentials.netezzaOptions?.secureConnection || false,
-      // Note: Pool/Connection timeout is for connection establishment, NOT query timeout
-      // Query timeout is handled by our Promise.race() logic
-      // Pool-specific options with defaults
-      min: this.credentials.netezzaOptions?.pool?.min || 1,
-      max: this.credentials.netezzaOptions?.pool?.max || 5,
-      idleTimeoutMillis: this.credentials.netezzaOptions?.pool?.idleTimeoutMillis || 30000
-    };
 
-    this.pool = new Pool(poolOptions);
-    
-    // Test the pool by acquiring a connection
-    try {
-      const testConn = await this.pool.acquire();
-      await this.pool.release(testConn);
-      
-      this.connection = Promise.resolve(this.pool);
-      
-      // Set the current catalog to the connection's database (only if not already set)
-      if (!this.currentCatalog) {
-        this.currentCatalog = this.credentials.database;
-      }
-      console.log(`[Netezza Driver] Connection pool opened. Current catalog: ${this.currentCatalog}`);
-      console.log(`[Netezza Driver] Pool configuration: min=${poolOptions.min}, max=${poolOptions.max}, idleTimeout=${poolOptions.idleTimeoutMillis}ms`);
-      
-      return this.connection;
-    } catch (err: any) {
-      // Provide more context for connection failures
-      await this.pool.end();
-      this.pool = null;
-      
-      const errorMsg = err.code === 'ECONNREFUSED' 
-        ? `Cannot connect to Netezza at ${this.credentials.server}:${this.credentials.port || 5480}. Please verify the server is running and accessible.`
-        : `Connection failed: ${err.message}`;
-      throw new Error(errorMsg);
-    }
+    // Create pool manager
+    this.poolManager = new PoolManager(
+      this.credentials.server,
+      this.credentials.port || DEFAULT_PORT,
+      this.credentials.database,
+      this.credentials.username,
+      this.credentials.password,
+      this.credentials.netezzaOptions?.secureConnection || false,
+      this.credentials.netezzaOptions?.pool
+    );
+
+    // Initialize result builder
+    this.resultBuilder = new ResultBuilder(this.getId());
+
+    // Initialize pool
+    await this.poolManager.initialize();
+
+    // Set the current catalog to the connection's database
+    this.poolManager.setCatalog(this.credentials.database);
+
+    this.connection = Promise.resolve(this.poolManager);
+    console.log(`[Netezza Driver] Connection pool opened. Current catalog: ${this.currentCatalog}`);
+
+    return this.connection;
   }
 
   /**
    * Closes the connection to the Netezza database
    */
   public async close(): Promise<void> {
-    if (!this.connection && !this.pool) {
+    if (!this.connection && !this.poolManager) {
       return;
     }
 
     try {
-      if (this.pool) {
-        await this.pool.end();
+      if (this.poolManager) {
+        await this.poolManager.close();
         console.log('[Netezza Driver] Connection pool closed');
       }
     } catch (err) {
       console.error('[Netezza Driver] Error closing pool:', err);
     } finally {
-      this.pool = null;
+      this.poolManager = null;
       this.connection = null;
     }
   }
 
-  private async queryWithTimeout(query: string, timeoutMs: number, queryInfo?: { index: number; total: number }): Promise<NSDatabase.IResult[]> {
-    // Serialize queries to prevent parallel execution issues on Netezza
+  /**
+   * Serializes query execution to prevent parallel execution issues
+   */
+  private async queryWithTimeout(
+    query: string,
+    timeoutMs: number,
+    queryInfo?: QueryInfo,
+    bypassLimit = false
+  ): Promise<NSDatabase.IResult[]> {
     return new Promise((resolve, reject) => {
       this.queryQueue = this.queryQueue.then(async () => {
         try {
-          const result = await this.executeQueryInternal(query, timeoutMs, queryInfo);
+          const result = await this.executeQueryInternal(query, timeoutMs, queryInfo, bypassLimit);
           resolve(result);
         } catch (err) {
           reject(err);
@@ -145,372 +157,281 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
   }
 
   /**
-   * Ensures the connection is set to the current catalog.
-   * Must be called after acquiring a connection from the pool.
+   * Internal query execution with connection management
    */
-  private async ensureCatalog(conn: any): Promise<void> {
-    if (!this.currentCatalog) {
-      console.log(`[Netezza Driver] No current catalog set, skipping ensureCatalog`);
-      return;
-    }
-    
-    // Set catalog on this specific connection
-    try {
-      await conn.execute(`SET CATALOG ${this.currentCatalog}`);
-      console.log(`[Netezza Driver] Successfully set catalog to ${this.currentCatalog} on pooled connection`);
-    } catch (err: any) {
-      console.error(`[Netezza Driver] FAILED to set catalog to ${this.currentCatalog}:`, err.message || err);
-      // Don't throw - allow query to proceed, it might work anyway
-    }
-  }
-
-  private async executeQueryInternal(query: string, timeoutMs: number, queryInfo?: { index: number; total: number }): Promise<NSDatabase.IResult[]> {
+  private async executeQueryInternal(
+    query: string,
+    timeoutMs: number,
+    queryInfo?: QueryInfo,
+    bypassLimit = false
+  ): Promise<NSDatabase.IResult[]> {
     // Ensure pool is initialized
     await this.open();
-    
-    if (!this.pool) {
-      const errorResult: NSDatabase.IResult = {
-        connId: this.getId(),
-        requestId: query,
-        resultId: generateId(),
-        cols: ['error'],
-        messages: [
-          `═══════════════════════════════════════════`,
-          `❌ CONNECTION FAILED`,
-          `═══════════════════════════════════════════`,
-          `Error: Connection pool not initialized`
-        ],
-        error: true,
-        rawError: new Error('Connection pool not initialized'),
-        query: query,
-        results: []
-      };
-      return [errorResult];
+
+    if (!this.poolManager || !this.resultBuilder) {
+      // Create a temporary result builder if needed for error reporting
+      const builder = this.resultBuilder ?? new ResultBuilder(this.getId());
+      return [builder.connectionError(query, 'Connection pool not initialized')];
     }
-    
-    // Get a connection from the pool
+
+    // Check if this is a SET CATALOG statement and update currentCatalog
+    const newCatalog = this.queryParser.extractCatalogFromSetStatement(query);
+    if (newCatalog) {
+      console.log(`[Netezza Driver] Detected SET CATALOG, updating currentCatalog to: ${newCatalog}`);
+      this.poolManager.setCatalog(newCatalog);
+    }
+
+    // Acquire connection from pool
     let conn;
     try {
-      conn = await this.pool.acquire();
+      conn = await this.poolManager.acquire();
     } catch (err: any) {
-      // Connection failed - return error result
-      const errorResult: NSDatabase.IResult = {
-        connId: this.getId(),
-        requestId: query,
-        resultId: generateId(),
-        cols: ['error'],
-        messages: [
-          `═══════════════════════════════════════════`,
-          `❌ CONNECTION FAILED`,
-          `═══════════════════════════════════════════`,
-          `Error: ${err.message || err}`
-        ],
-        error: true,
-        rawError: err,
-        query: query,
-        results: []
-      };
-      return [errorResult];
+      return [this.resultBuilder.connectionError(query, err.message || String(err))];
     }
 
-    const queryPreview = query.replace(/\s+/g, ' ').trim().substring(0, 50);
+    const startTime = Date.now();
     console.log('[Netezza Driver] Executing query:', query);
     console.log(`[Netezza Driver] Query timeout set to: ${timeoutMs}ms`);
-    const startTime = Date.now();
-    
-    // Check if this is a SET CATALOG statement and update currentCatalog
-    const setCatalogMatch = query.trim().match(/^SET\s+CATALOG\s+(\w+)/i);
-    if (setCatalogMatch) {
-      const newCatalog = setCatalogMatch[1];
-      console.log(`[Netezza Driver] Detected SET CATALOG, updating currentCatalog to: ${newCatalog}`);
-      this.currentCatalog = newCatalog;
-    }
 
     try {
-      // Only ensure catalog if this is NOT a SET CATALOG statement
-      if (!setCatalogMatch) {
-        await this.ensureCatalog(conn);
-      }
-      
-      // Create timeout promise
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(new Error(`Query timeout after ${timeoutMs}ms`));
-        }, timeoutMs);
-      });
-      
-      // Execute query with timeout
-      const queryPromise = conn.execute(query);
-      this.runningQueries.add(queryPromise);
-      
-      let data;
-      let timedOut = false;
-      try {
-        data = await Promise.race([queryPromise, timeoutPromise]);
-      } catch (err) {
-        // Check if it's a timeout error
-        if (err instanceof Error && err.message.includes('timeout')) {
-          timedOut = true;
-          console.log('[Netezza Driver] Query timed out, forcefully closing connection');
-          // Close the connection immediately - don't wait for graceful shutdown
-          // The query is still running on the server, we need to abort the connection
-          try {
-            // Try to destroy the socket directly for immediate closure
-            const connWithSocket = conn as any;
-            if (connWithSocket.socket) {
-              connWithSocket.socket.destroy();
-              console.log('[Netezza Driver] Socket destroyed');
-            } else {
-              await conn.close();
-            }
-          } catch (closeErr) {
-            console.error('[Netezza Driver] Error closing timed-out connection:', closeErr);
-          }
-        }
-        throw err; // Re-throw to be caught by outer catch
-      } finally {
-        this.runningQueries.delete(queryPromise);
-      }
-      
-      // Only release if we didn't timeout
-      if (!timedOut) {
-        await this.pool!.release(conn);
-      }
-      
-      const elapsedTime = Date.now() - startTime;
-      console.log(`[Netezza Driver] Query completed in ${elapsedTime}ms`);
-      
-      if (!data) {
-        return [];
-      }
-
-      // Handle different response formats from node-netezza
-      let cols: any[] = [];
-      let rows: any[] = [];
-      
-      // Check if data has columns and rows properties
-      if (data.columns && Array.isArray(data.columns)) {
-        cols = data.columns;
-        rows = data.rows || [];
-      } 
-      // Check if data is directly an array of rows
-      else if (Array.isArray(data)) {
-        rows = data;
-        // Extract columns from first row if available
-        if (rows.length > 0) {
-          cols = Object.keys(rows[0]).map(key => ({ name: key }));
-        }
-      }
-      // Check if data has fields and rows (alternative format)
-      else if (data.fields && Array.isArray(data.fields)) {
-        cols = data.fields;
-        rows = data.rows || [];
-      }
-
-      const messages: string[] = [];
-      
-      // Add current catalog/database
-      if (this.currentCatalog) {
-        messages.push(`Database: ${this.currentCatalog}`);
-      }
-      
-      // Add the full executed query (normalize whitespace for display)
-      const normalizedQuery = query.replace(/\s+/g, ' ').trim();
-      messages.push(`Query: ${normalizedQuery}`);
-      
-      // Add execution time message
-      messages.push(`Elapsed time: ${elapsedTime}ms`);
-      
-      // Limit rows to prevent UI hang with large result sets
-      // Use SQLTools pageSize and limit from connection settings
-      const pageSize = this.credentials.pageSize || 50;
-      const maxRows = this.credentials.previewLimit || pageSize;
-      const totalRows = rows.length;
-      const isLimited = maxRows > 0 && rows.length > maxRows;
-      if (isLimited) {
-        rows = rows.slice(0, maxRows);
-        messages.push(`Query returned ${totalRows} rows. Showing first ${maxRows} rows. Adjust 'Show records default limit' in connection settings to change this limit.`);
-      }
-      
-      // Add a message about the number of rows affected for non-SELECT queries
-      if (!query.trim().toUpperCase().startsWith('SELECT')) {
-        if (data.rowCount !== undefined) {
-          messages.push(`${data.rowCount} rows affected`);
-        }
-      }
-      
-      const result: NSDatabase.IResult = {
-        connId: this.getId(),
-        requestId: query,
-        resultId: generateId(),
-        cols: cols.map((c: any) => c.name || c),
-        messages: messages,
-        query: query,
-        results: rows,
-      };
-
+      const result = await this.executeWithTimeout(conn, query, timeoutMs, bypassLimit, startTime);
+      await this.poolManager.release(conn);
       return [result];
     } catch (err: any) {
       const elapsedTime = Date.now() - startTime;
-      console.log(`[Netezza Driver] Query failed after ${elapsedTime}ms:`, err.message);
-      
-      // Check if this was a timeout (connection already closed) or other error
-      const isTimeout = err.message && err.message.includes('timeout');
-      
-      // CRITICAL: Close the bad connection instead of returning it to pool
-      // node-netezza connections become unreliable after errors
-      // BUT: Don't close if it was a timeout - already handled above
-      if (conn && !isTimeout) {
-        try {
-          console.log('[Netezza Driver] Closing bad connection after error');
-          await conn.close();
-        } catch (closeErr) {
-          console.error('[Netezza Driver] Error closing bad connection:', closeErr);
-        }
-      }
-      
-      // For severe errors (timeout or connection issues), close and recreate the pool
-      if (isTimeout || err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED') {
-        console.log('[Netezza Driver] Severe error detected, recreating connection pool');
-        try {
-          if (this.pool) {
-            await this.pool.end();
-          }
-          this.pool = null;
-          this.connection = null;
-          // Pool will be recreated on next query via open()
-        } catch (poolErr) {
-          console.error('[Netezza Driver] Error closing pool:', poolErr);
-        }
-      }
-      
-      const messages: string[] = [];
-      
-      // Add current catalog/database
-      if (this.currentCatalog) {
-        messages.push(`Database: ${this.currentCatalog}`);
-      }
-      
-      // Add the full executed query (normalize whitespace for display)
-      const normalizedQuery = query.replace(/\s+/g, ' ').trim();
-      messages.push(`Query: ${normalizedQuery}`);
-      
-      // Add execution time
-      messages.push(`Elapsed time: ${elapsedTime}ms`);
-      
-      // Add prominent error marker
-      messages.push(`═══════════════════════════════════════════`);
-      messages.push(`❌ QUERY FAILED`);
-      messages.push(`═══════════════════════════════════════════`);
-      
-      // Add detailed error information
-      if (err.message && err.message.includes('timeout')) {
-        messages.push(`Error Type: Query Timeout`);
-        messages.push(`Details: Query execution exceeded the timeout limit of ${timeoutMs}ms`);
-        messages.push(`Suggestion: Consider optimizing the query or increasing the timeout setting`);
-      } else {
-        messages.push(`Error: ${err.message || err}`);
-        
-        // Add additional error details if available (Netezza-specific)
-        if (err.code) {
-          messages.push(`Error Code: ${err.code}`);
-        }
-        if (err.detail) {
-          messages.push(`Details: ${err.detail}`);
-        }
-        if (err.hint) {
-          messages.push(`Hint: ${err.hint}`);
-        }
-        if (err.position) {
-          messages.push(`Position: ${err.position}`);
-        }
-        if (err.where) {
-          messages.push(`Where: ${err.where}`);
-        }
-      }
-      
-      messages.push(`─────────────────────────────────────────`);
-      messages.push(`Connection closed. Will reconnect for next query.`);
-      
-      // Return error in SQLTools result format instead of throwing
-      const errorResult: NSDatabase.IResult = {
-        connId: this.getId(),
-        requestId: query,
-        resultId: generateId(),
-        cols: ['error'],
-        messages: messages,
-        error: true,  // Mark as error
-        rawError: err,
-        query: query,
-        results: []
-      };
-      return [errorResult];
+      return [this.handleQueryError(conn, query, err, timeoutMs, elapsedTime)];
     }
   }
 
   /**
+   * Executes query with timeout using Promise.race
+   */
+  private async executeWithTimeout(
+    conn: any,
+    query: string,
+    timeoutMs: number,
+    bypassLimit: boolean,
+    startTime: number
+  ): Promise<NSDatabase.IResult> {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new QueryTimeoutError(timeoutMs, query.substring(0, 100)));
+      }, timeoutMs);
+    });
+
+    const queryPromise = conn.execute(query);
+    this.runningQueries.add(queryPromise);
+
+    try {
+      const data = await Promise.race([queryPromise, timeoutPromise]);
+      return this.processQueryResult(query, data, startTime, bypassLimit);
+    } finally {
+      this.runningQueries.delete(queryPromise);
+    }
+  }
+
+  /**
+   * Processes successful query result
+   */
+  private processQueryResult(
+    query: string,
+    data: any,
+    startTime: number,
+    bypassLimit: boolean
+  ): NSDatabase.IResult {
+    const elapsedTime = Date.now() - startTime;
+    console.log(`[Netezza Driver] Query completed in ${elapsedTime}ms`);
+
+    if (!data) {
+      return this.resultBuilder!.success(query, [], [], [`Elapsed time: ${elapsedTime}ms`]);
+    }
+
+    // Handle different response formats from node-netezza
+    let cols: any[] = [];
+    let rows: any[] = [];
+
+    if (data.columns && Array.isArray(data.columns)) {
+      cols = data.columns;
+      rows = data.rows || [];
+    } else if (Array.isArray(data)) {
+      rows = data;
+      if (rows.length > 0) {
+        cols = Object.keys(rows[0]).map(key => ({ name: key }));
+      }
+    } else if (data.fields && Array.isArray(data.fields)) {
+      cols = data.fields;
+      rows = data.rows || [];
+    }
+
+    const messages: string[] = [];
+
+    // Add current catalog/database
+    if (this.currentCatalog) {
+      messages.push(`Database: ${this.currentCatalog}`);
+    }
+
+    // Add the full executed query (normalize whitespace for display)
+    const normalizedQuery = query.replace(/\s+/g, ' ').trim();
+    messages.push(`Query: ${normalizedQuery}`);
+    messages.push(`Elapsed time: ${elapsedTime}ms`);
+
+    // Limit rows to prevent UI hang with large result sets
+    const pageSize = this.credentials.pageSize || 50;
+    const maxRows = this.credentials.previewLimit || pageSize;
+    const totalRows = rows.length;
+    const isLimited = !bypassLimit && maxRows > 0 && rows.length > maxRows;
+    if (isLimited) {
+      rows = rows.slice(0, maxRows);
+      messages.push(`Query returned ${totalRows} rows. Showing first ${maxRows} rows. Adjust 'Show records default limit' in connection settings to change this limit.`);
+    }
+
+    // Add row count for non-SELECT queries
+    if (!query.trim().toUpperCase().startsWith('SELECT') && data.rowCount !== undefined) {
+      messages.push(`${data.rowCount} rows affected`);
+    }
+
+    return this.resultBuilder!.success(
+      query,
+      cols.map((c: any) => c.name || c),
+      rows,
+      messages
+    );
+  }
+
+  /**
+   * Handles query execution errors
+   */
+  private handleQueryError(
+    conn: any,
+    query: string,
+    err: any,
+    timeoutMs: number,
+    elapsedTime: number
+  ): NSDatabase.IResult {
+    console.log(`[Netezza Driver] Query failed after ${elapsedTime}ms:`, err.message);
+
+    const isTimeout = err.message && err.message.includes('timeout');
+
+    // Close the bad connection
+    if (conn && this.poolManager) {
+      if (isTimeout) {
+        this.poolManager.closeConnection(conn);
+      } else {
+        this.poolManager.closeConnection(conn);
+      }
+    }
+
+    // For severe errors, reset the pool
+    if (isTimeout || err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED') {
+      console.log('[Netezza Driver] Severe error detected, recreating connection pool');
+      this.resetPool();
+    }
+
+    if (isTimeout) {
+      return this.resultBuilder!.timeout(query, timeoutMs, elapsedTime, this.currentCatalog);
+    }
+
+    const additionalMessages = [
+      `Elapsed time: ${elapsedTime}ms`,
+      `─────────────────────────────────────────`,
+      `Connection closed. Will reconnect for next query.`,
+    ];
+
+    return this.resultBuilder!.error(query, err, additionalMessages, this.currentCatalog);
+  }
+
+  /**
+   * Resets the connection pool after severe errors
+   */
+  private async resetPool(): Promise<void> {
+    try {
+      if (this.poolManager) {
+        await this.poolManager.close();
+      }
+      this.poolManager = null;
+      this.connection = null;
+    } catch (err) {
+      console.error('[Netezza Driver] Error resetting pool:', err);
+    }
+  }
+
+
+
+  /**
    * Executes a SQL query with the configured timeout
-   * When multiple statements are detected, they are executed sequentially.
    */
   public async query(query: string, opt: any = {}): Promise<NSDatabase.IResult[]> {
-    // Log what we received to understand what SQLTools is sending
     console.log('[Netezza Driver] query() called with:');
     console.log('  Query length:', query.length);
     console.log('  Query preview:', JSON.stringify(query.substring(0, 100)));
-    console.log('  Options:', JSON.stringify(opt));
-    
-    // If query is empty, return empty result
+
     if (!query || query.trim().length === 0) {
       console.log('[Netezza Driver] Empty query received, returning empty result');
       return [];
     }
-    
+
     // Parse the query to check if it contains multiple statements
-    const parsedQueries = await Promise.resolve(this.parse(query));
+    const parsedQueries = this.queryParser.parse(query);
     console.log(`[Netezza Driver] Parsed ${parsedQueries.length} query/queries`);
-    
-    // If we have multiple queries, execute them sequentially and return all results
+
     if (parsedQueries.length > 1) {
-      console.log(`[Netezza Driver] Executing ${parsedQueries.length} queries sequentially`);
-      const allResults: NSDatabase.IResult[] = [];
-      const overallStartTime = Date.now();
-      
-      for (let i = 0; i < parsedQueries.length; i++) {
-        const queryText = parsedQueries[i];
-        console.log(`[Netezza Driver] Executing query ${i + 1} of ${parsedQueries.length}`);
-        
-        // executeQueryInternal always returns results, even for errors
-        // No need for try-catch here since errors are returned as error result objects
-        const results = await this.queryWithTimeout(queryText, this.queryTimeout, { 
-          index: i + 1, 
-          total: parsedQueries.length 
-        });
-        allResults.push(...results);
-      }
-      
-      const totalElapsedTime = Date.now() - overallStartTime;
-      
-      // Add summary message to the last result
-      if (allResults.length > 0) {
-        const lastResult = allResults[allResults.length - 1];
-        const existingMessages = lastResult.messages || [];
-        lastResult.messages = [
-          ...existingMessages,
-          `─────────────────────────────────────────`,
-          `Total execution time for ${parsedQueries.length} queries: ${totalElapsedTime}ms`
-        ];
-      }
-      
-      return allResults;
+      return this.executeMultipleQueries(parsedQueries);
     }
-    
-    // Execute single query (this handles both single statements and complex queries like UNION)
+
     return this.queryWithTimeout(query, this.queryTimeout);
   }
 
   /**
-   * Cancels the currently running query by closing and reopening the connection
-   * Note: Netezza doesn't support query cancellation, so we close the connection
+   * Executes multiple queries sequentially
+   */
+  private async executeMultipleQueries(queries: string[]): Promise<NSDatabase.IResult[]> {
+    console.log(`[Netezza Driver] Executing ${queries.length} queries sequentially`);
+    const allResults: NSDatabase.IResult[] = [];
+    const overallStartTime = Date.now();
+
+    for (let i = 0; i < queries.length; i++) {
+      const queryText = queries[i];
+      console.log(`[Netezza Driver] Executing query ${i + 1} of ${queries.length}`);
+
+      const results = await this.queryWithTimeout(queryText, this.queryTimeout, {
+        index: i + 1,
+        total: queries.length,
+      });
+      allResults.push(...results);
+    }
+
+    const totalElapsedTime = Date.now() - overallStartTime;
+
+    // Add summary message to the last result
+    if (allResults.length > 0) {
+      const lastResult = allResults[allResults.length - 1];
+      lastResult.messages = [
+        ...(lastResult.messages || []),
+        `─────────────────────────────────────────`,
+        `Total execution time for ${queries.length} queries: ${totalElapsedTime}ms`,
+      ];
+    }
+
+    return allResults;
+  }
+
+  /**
+   * Parses SQL text and identifies individual query boundaries
+   */
+  public parse(query: string, driver?: string): Promise<string[]> | string[] {
+    console.log(`[Netezza Driver] Parsing query with length: ${query.length}`);
+    const queries = this.queryParser.parse(query);
+    
+    queries.forEach((q, i) => {
+      console.log(`[Netezza Driver] Found query ${i + 1}: ${q.substring(0, 50)}...`);
+    });
+    
+    console.log(`[Netezza Driver] Parsed ${queries.length} query/queries`);
+    return queries.length > 0 ? queries : [query];
+  }
+
+  /**
+   * Cancels running queries by resetting the connection pool
    */
   public async cancelQuery(): Promise<void> {
     if (this.runningQueries.size === 0) {
@@ -518,11 +439,11 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
     }
 
     try {
-      // For Netezza, we need to close and reopen the connection to cancel a query
       await this.close();
       this.runningQueries.clear();
     } catch (err: any) {
-      throw new Error(`Failed to cancel query: ${err.message}`);
+      console.error('[Netezza Driver] Failed to cancel query:', err);
+      throw err;
     }
   }
 
@@ -531,10 +452,10 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
    */
   public async testConnection(): Promise<void> {
     await this.open();
-    
+
     try {
       const result = await this.query('SELECT CURRENT_CATALOG, CURRENT_USER, VERSION() AS version');
-      
+
       if (result?.[0]?.results?.[0]) {
         const info = result[0].results[0];
         console.log(`[Netezza Driver] Connected to ${info.current_catalog} as ${info.current_user}`);
@@ -547,476 +468,27 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
   }
 
   /**
-   * Parses SQL text and identifies individual query boundaries
-   * This allows SQLTools to recognize each semicolon-terminated statement
-   * as a separate executable query
-   */
-  public parse(query: string, driver?: string): Promise<string[]> | string[] {
-    console.log(`[Netezza Driver] Parsing query with length: ${query.length}`);
-    
-    // Split by semicolons but handle strings and comments
-    const queries: string[] = [];
-    let currentQuery = '';
-    let inSingleQuote = false;
-    let inDoubleQuote = false;
-    let inLineComment = false;
-    let inBlockComment = false;
-    
-    for (let i = 0; i < query.length; i++) {
-      const char = query[i];
-      const nextChar = i + 1 < query.length ? query[i + 1] : '';
-      const prevChar = i > 0 ? query[i - 1] : '';
-      
-      // Handle line comments (-- )
-      if (!inSingleQuote && !inDoubleQuote && !inBlockComment && char === '-' && nextChar === '-') {
-        inLineComment = true;
-        currentQuery += char;
-        continue;
-      }
-      
-      // End line comment on newline
-      if (inLineComment && char === '\n') {
-        inLineComment = false;
-        currentQuery += char;
-        continue;
-      }
-      
-      // Handle block comments (/* */)
-      if (!inSingleQuote && !inDoubleQuote && !inLineComment && char === '/' && nextChar === '*') {
-        inBlockComment = true;
-        currentQuery += char;
-        continue;
-      }
-      
-      if (inBlockComment && char === '*' && nextChar === '/') {
-        inBlockComment = false;
-        currentQuery += char + nextChar;
-        i++; // Skip next character
-        continue;
-      }
-      
-      // Handle string literals with proper escaping
-      if (!inLineComment && !inBlockComment) {
-        if (char === "'" && !inDoubleQuote) {
-          // Check for escaped single quote (two consecutive single quotes)
-          if (inSingleQuote && nextChar === "'") {
-            currentQuery += char + nextChar;
-            i++; // Skip next character
-            continue;
-          }
-          inSingleQuote = !inSingleQuote;
-        } else if (char === '"' && !inSingleQuote) {
-          // Check for escaped double quote
-          if (inDoubleQuote && nextChar === '"') {
-            currentQuery += char + nextChar;
-            i++; // Skip next character
-            continue;
-          }
-          inDoubleQuote = !inDoubleQuote;
-        }
-      }
-      
-      // Check for semicolon (statement terminator)
-      if (char === ';' && !inSingleQuote && !inDoubleQuote && !inLineComment && !inBlockComment) {
-        currentQuery += char;
-        const trimmedQuery = currentQuery.trim();
-        if (trimmedQuery.length > 0) {
-          console.log(`[Netezza Driver] Found query: ${trimmedQuery.substring(0, 50)}...`);
-          queries.push(trimmedQuery);
-        }
-        currentQuery = '';
-        continue;
-      }
-      
-      currentQuery += char;
-    }
-    
-    // Add any remaining query without semicolon
-    const trimmedQuery = currentQuery.trim();
-    if (trimmedQuery.length > 0) {
-      console.log(`[Netezza Driver] Found query (no semicolon): ${trimmedQuery.substring(0, 50)}...`);
-      queries.push(trimmedQuery);
-    }
-    
-    console.log(`[Netezza Driver] Parsed ${queries.length} query/queries`);
-    return queries.length > 0 ? queries : [query];
-  }
-
-  public async getChildrenForItem({ item, parent }: Arg0<IConnectionDriver['getChildrenForItem']>) {
-    switch (item.type) {
-      case ContextValue.CONNECTION:
-      case ContextValue.CONNECTED_CONNECTION:
-        console.log('[Netezza Driver] Fetching databases...');
-        const databases = await this.executeQuery(this.queries.fetchDatabases);
-        console.log(`[Netezza Driver] Loaded ${databases.length} database(s)`);
-        return databases;
-      case ContextValue.DATABASE:
-        const dbName = (item as NSDatabase.IDatabase).database;
-        console.log(`[Netezza Driver] Fetching schemas for database: ${dbName}`);
-        // Switch to the selected database before querying schemas
-        await this.queryWithTimeout(`SET CATALOG ${dbName};`, this.queryTimeout);
-        this.currentCatalog = dbName;
-        console.log(`[Netezza Driver] Set current catalog to: ${dbName}`);
-        const schemas = await this.executeQuery(this.queries.fetchSchemas, { database: dbName });
-        console.log(`[Netezza Driver] Loaded ${schemas.length} schema(s)`);
-        return schemas;
-      case ContextValue.SCHEMA:
-        const schemaItem = item as NSDatabase.ISchema;
-        console.log(`[Netezza Driver] Fetching objects for schema: ${schemaItem.schema}`);
-        
-        const [tables, views] = await Promise.all([
-          this.executeQuery(this.queries.fetchTables, schemaItem),
-          this.executeQuery(this.queries.fetchViews, schemaItem)
-        ]);
-        
-        const enrichedObjects = [...tables, ...views].map(obj => {
-          const simpleName = obj.tableName || obj.label;
-          const fullyQualified = `${obj.database}.${obj.schema}.${simpleName}`;
-          return {
-            ...obj,
-            tableName: simpleName,
-            label: fullyQualified,
-            detail: simpleName,
-            childType: ContextValue.COLUMN
-          };
-        });
-        
-        console.log(`[Netezza Driver] Loaded ${enrichedObjects.length} objects (${tables.length} tables, ${views.length} views)`);
-        return enrichedObjects;
-      case ContextValue.TABLE:
-      case ContextValue.VIEW:
-        const table = item as NSDatabase.ITable;
-        const tableType = item.type === ContextValue.TABLE ? 'table' : 'view';
-        
-        console.log(`[Netezza Driver] Fetching columns for ${tableType}: ${table.schema}.${table.label}`);
-        const columns = await this.executeQuery(this.queries.fetchColumns, table);
-        console.log(`[Netezza Driver] Loaded ${columns.length} columns`);
-        
-        return columns.map(col => ({ 
-          ...col, 
-          isLeaf: true,
-          childType: ContextValue.NO_CHILD,
-          type: ContextValue.COLUMN
-        }));
-      case ContextValue.COLUMN:
-        console.log('[Netezza Driver] Warning: getChildrenForItem called for COLUMN (leaf node)');
-        return [];
-    }
-    return [];
-  }
-
-  /**
-   * Searches for database items (schemas, tables, views, columns) based on type
-   */
-  public async searchItems(itemType: ContextValue, search = '', extraParams: any = {}): Promise<NSDatabase.SearchableItem[]> {
-    // Extract schema context from various possible parameter formats
-    let schemaContext = extraParams.schema || extraParams.database || extraParams.parentName || null;
-    
-    if (!schemaContext && extraParams.parentLabel) {
-      schemaContext = extraParams.parentLabel;
-    }
-    if (!schemaContext && extraParams.parent?.schema) {
-      schemaContext = extraParams.parent.schema;
-    }
-    
-    console.log(`[Netezza Driver] Searching for ${itemType}${schemaContext ? ` in schema "${schemaContext}"` : ''} with term: "${search}"`);
-    
-    switch (itemType) {
-      case ContextValue.DATABASE:
-      case ContextValue.SCHEMA:
-        // Search for schemas
-        const schemas = await this.executeCompletionQuery(
-          `SELECT SCHEMA AS label, SCHEMA AS schema
-           FROM _V_SCHEMA
-           WHERE SCHEMA LIKE '%${search || ''}%'
-           ORDER BY SCHEMA`
-        );
-        return schemas.map((s: any) => ({
-          label: s.label,
-          type: ContextValue.SCHEMA,
-          schema: s.schema,
-          database: this.currentCatalog || '',
-          childType: ContextValue.TABLE,
-          iconId: 'schema',
-          detail: 'Schema'
-        } as any));
-
-      case ContextValue.TABLE:
-        // Search for tables
-        const tables = await this.executeCompletionQuery(
-          `SELECT TABLENAME AS label, 
-                  SCHEMA AS schema,
-                  TABLENAME AS table_name
-           FROM _V_TABLE
-           WHERE TABLENAME LIKE '%${search || ''}%'
-           ${schemaContext ? `AND UPPER(SCHEMA) = UPPER('${schemaContext}')` : ''}
-           ORDER BY TABLENAME
-           LIMIT 100`
-        );
-        return tables.map((t: any) => ({
-          label: t.label,
-          type: ContextValue.TABLE,
-          schema: t.schema,
-          database: this.currentCatalog || '',
-          tableName: t.table_name,
-          isView: false,
-          childType: ContextValue.COLUMN,
-          iconId: 'table',
-          detail: `Table in ${t.schema}`
-        } as any));
-
-      case ContextValue.VIEW:
-        // Search for views
-        const views = await this.executeCompletionQuery(
-          `SELECT VIEWNAME AS label,
-                  SCHEMA AS schema,
-                  VIEWNAME AS view_name
-           FROM _V_VIEW
-           WHERE VIEWNAME LIKE '%${search || ''}%'
-           ${schemaContext ? `AND UPPER(SCHEMA) = UPPER('${schemaContext}')` : ''}
-           ORDER BY VIEWNAME
-           LIMIT 100`
-        );
-        return views.map((v: any) => ({
-          label: v.label,
-          type: ContextValue.VIEW,
-          schema: v.schema,
-          database: this.currentCatalog || '',
-          tableName: v.view_name,
-          isView: true,
-          childType: ContextValue.COLUMN,
-          iconId: 'view',
-          detail: `View in ${v.schema}`
-        } as any));
-
-      case ContextValue.COLUMN:
-        // Search for columns
-        // SQLTools passes table context as: extraParams.tables = [{ label: 'TABLE_NAME', database: 'SCHEMA_NAME' }]
-        // In Netezza context, what SQLTools calls 'database' is actually the schema
-        let tableFilter = '';
-        let schemaFilter = '';
-        
-        if (extraParams.tables && Array.isArray(extraParams.tables) && extraParams.tables.length > 0) {
-          const tableInfo = extraParams.tables[0];
-          tableFilter = tableInfo.label || tableInfo.table || tableInfo.tableName || '';
-          schemaFilter = tableInfo.database || tableInfo.schema || '';
-        } else {
-          tableFilter = extraParams.table || '';
-          schemaFilter = extraParams.schema || '';
-        }
-        
-        const columns = await this.executeCompletionQuery(
-          `SELECT ATTNAME AS label,
-                  SCHEMA AS schema,
-                  NAME AS table_name,
-                  FORMAT_TYPE AS data_type,
-                  ATTNOTNULL AS is_nullable
-           FROM _V_RELATION_COLUMN
-           WHERE ATTNAME LIKE '%${search || ''}%'
-           ${schemaFilter ? `AND UPPER(SCHEMA) = UPPER('${schemaFilter}')` : ''}
-           ${tableFilter ? `AND UPPER(NAME) = UPPER('${tableFilter}')` : ''}
-           ORDER BY ATTNUM
-           LIMIT 100`
-        );
-        
-        return columns.map((c: any) => ({
-          label: c.label,
-          type: ContextValue.COLUMN,
-          schema: c.schema,
-          database: this.currentCatalog || '',
-          table: c.table_name,
-          columnName: c.label,
-          dataType: c.data_type,
-          isNullable: !c.is_nullable,
-          iconId: 'column',
-          detail: `${c.data_type} - ${c.table_name}`
-        } as any));
-
-      case ContextValue.FUNCTION:
-        const functions = await this.executeCompletionQuery(
-          `SELECT FUNCTION AS label, SCHEMA AS schema
-           FROM _V_FUNCTION
-           WHERE FUNCTION LIKE '%${search || ''}%'
-           ORDER BY FUNCTION`
-        );
-        return functions.map((f: any) => ({
-          label: f.label,
-          type: ContextValue.FUNCTION,
-          schema: f.schema,
-          database: this.currentCatalog || '',
-          name: f.label,
-          iconId: 'function',
-          detail: 'Function'
-        } as any));
-    }
-    
-    return [];
-  }
-
-  /**
-   * Describes a table's structure (columns, types, etc.)
-   */
-  public async describeTable(table: NSDatabase.ITable, opt: any = {}): Promise<NSDatabase.IResult[]> {
-    if (table.database) {
-      await this.query(`SET CATALOG ${table.database}`);
-      this.currentCatalog = table.database;
-    }
-    const queryStr = typeof this.queries.describeTable === 'function' 
-      ? this.queries.describeTable(table) 
-      : this.queries.describeTable;
-    return await this.queryWithTimeout(queryStr as string, this.queryTimeout);
-  }
-
-  /**
-   * Executes a query function with parameters and returns the results
-   */
-  private async executeQuery(queryFn: any, params?: any, useConfiguredTimeout = true): Promise<any[]> {
-    const queryStr = typeof queryFn === 'function' ? queryFn(params) : queryFn;
-    const timeout = useConfiguredTimeout ? this.queryTimeout : 10000;
-    const results = await this.queryWithTimeout(queryStr, timeout);
-    return results[0]?.results || [];
-  }
-
-  /**
    * Returns static completions (keywords, functions, data types)
-   * Results are cached for performance
    */
   public getStaticCompletions = async (): Promise<any> => {
     if (!this.completionsCache) {
       this.completionsCache = await this.loadCompletions();
     }
     return this.completionsCache;
-  }
-
-  /**
-   * Provides context-aware completions based on cursor position and query context
-   */
-  public async getCompletionsForConnection(params: any): Promise<any[]> {
-    const { position, query } = params;
-    
-    if (!query || position === undefined) {
-      return this.getStaticCompletions();
-    }
-    
-    const beforeCursor = query.substring(0, position);
-    const lastKeyword = this.getLastKeyword(beforeCursor);
-    
-    console.log(`[Netezza Driver] Context-aware completion. Last keyword: "${lastKeyword}"`);
-    
-    // Check if user is typing a schema-qualified table name (e.g., "schema.")
-    const schemaMatch = beforeCursor.match(/\b([a-z_][a-z0-9_]*)\.$/i);
-    if (schemaMatch) {
-      const schemaName = schemaMatch[1];
-      console.log(`[Netezza Driver] Schema-qualified table reference detected: ${schemaName}`);
-      const tables = await this.searchItems(ContextValue.TABLE, '', { schema: schemaName });
-      const views = await this.searchItems(ContextValue.VIEW, '', { schema: schemaName });
-      return [...tables, ...views];
-    }
-    
-    switch (lastKeyword) {
-      case 'FROM':
-      case 'JOIN':
-      case 'INTO':
-        // Return tables and views
-        console.log('[Netezza Driver] Suggesting tables and views');
-        const tables = await this.searchItems(ContextValue.TABLE, '', {});
-        const views = await this.searchItems(ContextValue.VIEW, '', {});
-        return [...tables, ...views];
-        
-      case 'WHERE':
-      case 'SELECT':
-      case 'SET':
-      case 'ON':
-        // Return columns from tables in FROM clause
-        const tablesInQuery = this.extractTablesFromQuery(query);
-        if (tablesInQuery.length > 0) {
-          console.log(`[Netezza Driver] [IntelliSense] Suggesting columns from tables: ${tablesInQuery.join(', ')}`);
-          const columnPromises = tablesInQuery.map(table => 
-            this.searchItems(ContextValue.COLUMN, '', { table })
-          );
-          const columnArrays = await Promise.all(columnPromises);
-          return columnArrays.flat();
-        }
-        break;
-    }
-    
-    // Default to static completions
-    return this.getStaticCompletions();
-  }
-
-  /**
-   * Extracts the last SQL keyword before the cursor position
-   */
-  private getLastKeyword(text: string): string {
-    const keywords = text.toUpperCase().split(/[\s,();]+/).filter(k => k.length > 0);
-    return keywords[keywords.length - 1] || '';
-  }
-
-  /**
-   * Extracts table names from FROM and JOIN clauses in a SQL query
-   */
-  private extractTablesFromQuery(query: string): string[] {
-    const fromMatches = query.match(/FROM\s+([^\s,()]+)/gi) || [];
-    const joinMatches = query.match(/JOIN\s+([^\s,()]+)/gi) || [];
-    
-    const tables = [...fromMatches, ...joinMatches]
-      .map(m => m.replace(/FROM\s+/i, '').replace(/JOIN\s+/i, ''))
-      .filter(t => t.length > 0);
-    
-    return [...new Set(tables)];
-  }
+  };
 
   /**
    * Loads and caches static and dynamic completions
    */
   private async loadCompletions(): Promise<CompletionsCache> {
     const completions: CompletionsCache = {
-      keywords: [
-        // Netezza-specific keywords
-        'DISTRIBUTE', 'ORGANIZE', 'ZONE', 'GROOM', 'GENERATE_STATISTICS',
-        'MATERIALIZED', 'EXTERNAL', 'SAMPLED', 'TEMP', 'TEMPORARY',
-        // Standard SQL keywords
-        'SELECT', 'FROM', 'WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'CROSS', 'FULL',
-        'GROUP', 'ORDER', 'HAVING', 'UNION', 'EXCEPT', 'INTERSECT',
-        'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP', 'TRUNCATE',
-        'AS', 'AND', 'OR', 'NOT', 'IN', 'EXISTS', 'BETWEEN', 'LIKE', 'IS', 'NULL',
-        'DISTINCT', 'ALL', 'ANY', 'SOME', 'BY', 'ON', 'USING', 'CASE', 'WHEN',
-        'THEN', 'ELSE', 'END', 'WITH', 'RECURSIVE', 'ASC', 'DESC', 'LIMIT', 'OFFSET',
-        'TABLE', 'VIEW', 'INDEX', 'SEQUENCE', 'DATABASE', 'SCHEMA', 'CONSTRAINT',
-        'PRIMARY', 'FOREIGN', 'KEY', 'REFERENCES', 'UNIQUE', 'CHECK', 'DEFAULT',
-        'INTO', 'VALUES', 'SET', 'CAST', 'CONVERT'
-      ],
-      functions: [
-        // Netezza-specific functions
-        'REGEXP_EXTRACT', 'REGEXP_LIKE', 'REGEXP_REPLACE',
-        'TO_CHAR', 'TO_DATE', 'TO_NUMBER', 'TO_TIMESTAMP',
-        // Aggregate functions
-        'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'STDDEV', 'VARIANCE',
-        // String functions
-        'CONCAT', 'SUBSTR', 'LENGTH', 'TRIM', 'LTRIM', 'RTRIM', 'UPPER', 'LOWER',
-        'REPLACE', 'POSITION', 'STRPOS',
-        // Date/Time functions
-        'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'NOW', 'EXTRACT',
-        'DATE_PART', 'DATE_TRUNC', 'AGE', 'INTERVAL',
-        // Numeric functions
-        'ABS', 'CEIL', 'FLOOR', 'ROUND', 'TRUNC', 'MOD', 'POWER', 'SQRT', 'EXP', 'LN', 'LOG',
-        // Conditional functions
-        'COALESCE', 'NULLIF', 'GREATEST', 'LEAST',
-        // Window functions
-        'ROW_NUMBER', 'RANK', 'DENSE_RANK', 'LAG', 'LEAD', 'FIRST_VALUE', 'LAST_VALUE'
-      ],
-      dataTypes: [
-        'BYTEINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'INT', 'INT1', 'INT2', 'INT4', 'INT8',
-        'NUMERIC', 'DECIMAL', 'FLOAT', 'REAL', 'DOUBLE', 'DOUBLE PRECISION',
-        'CHARACTER', 'VARCHAR', 'CHAR', 'NCHAR', 'NVARCHAR', 'TEXT',
-        'DATE', 'TIME', 'TIMESTAMP', 'INTERVAL',
-        'BOOLEAN', 'BOOL', 'BINARY', 'VARBINARY'
-      ],
-      // Add dynamic completions placeholders
+      keywords: [...ALL_KEYWORDS],
+      functions: [...ALL_FUNCTIONS],
+      dataTypes: [...DATA_TYPES],
       schemas: [],
       tables: [],
       columns: [],
-      variables: []
+      variables: [],
     };
 
     try {
@@ -1025,7 +497,7 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       completions.schemas = schemas.map((s: any) => ({
         label: s.schema,
         detail: 'Schema',
-        type: 'schema'
+        type: 'schema',
       }));
       console.log(`[Netezza Driver] [Intellisense] Loaded ${completions.schemas.length} schemas for completions`);
 
@@ -1044,9 +516,7 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
       } catch (err) {
         console.log('[Netezza Driver] [Intellisense] Could not load dynamic functions:', err);
       }
-
     } catch (err) {
-      // If we can't load dynamic completions, just return static ones
       console.error('[Netezza Driver] [Intellisense] Failed to load dynamic completions:', err);
     }
 
@@ -1067,7 +537,263 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
   }
 
   /**
-   * Fetches records from a table with configured timeout
+   * Provides context-aware completions based on cursor position and query context
+   */
+  public async getCompletionsForConnection(params: any): Promise<any[]> {
+    const { position, query } = params;
+
+    if (!query || position === undefined) {
+      const cache = await this.getStaticCompletions();
+      return [...cache.keywords, ...cache.functions, ...cache.dataTypes];
+    }
+
+    const beforeCursor = query.substring(0, position);
+    const lastKeyword = this.queryParser.getLastKeyword(beforeCursor);
+
+    console.log(`[Netezza Driver] Context-aware completion. Last keyword: "${lastKeyword}"`);
+
+    // Check if user is typing a schema-qualified table name (e.g., "schema.")
+    const schemaMatch = beforeCursor.match(/\b([a-z_][a-z0-9_]*)\.$/i);
+    if (schemaMatch) {
+      const schemaName = schemaMatch[1];
+      console.log(`[Netezza Driver] Schema-qualified table reference detected: ${schemaName}`);
+      const tables = await this.searchItems(ContextValue.TABLE, '', { schema: schemaName });
+      const views = await this.searchItems(ContextValue.VIEW, '', { schema: schemaName });
+      return [...tables, ...views];
+    }
+
+    switch (lastKeyword) {
+      case 'FROM':
+      case 'JOIN':
+      case 'INTO':
+        console.log('[Netezza Driver] Suggesting tables and views');
+        const tables = await this.searchItems(ContextValue.TABLE, '', {});
+        const views = await this.searchItems(ContextValue.VIEW, '', {});
+        return [...tables, ...views];
+
+      case 'WHERE':
+      case 'SELECT':
+      case 'SET':
+      case 'ON':
+        const tablesInQuery = this.queryParser.extractTables(query);
+        if (tablesInQuery.length > 0) {
+          console.log(`[Netezza Driver] [IntelliSense] Suggesting columns from tables: ${tablesInQuery.join(', ')}`);
+          const columnPromises = tablesInQuery.map(table =>
+            this.searchItems(ContextValue.COLUMN, '', { table })
+          );
+          const columnArrays = await Promise.all(columnPromises);
+          return columnArrays.flat();
+        }
+        break;
+    }
+
+    const cache = await this.getStaticCompletions();
+    return [...cache.keywords, ...cache.functions, ...cache.dataTypes];
+  }
+
+  public async getChildrenForItem({ item, parent }: Arg0<IConnectionDriver['getChildrenForItem']>) {
+    switch (item.type) {
+      case ContextValue.CONNECTION:
+      case ContextValue.CONNECTED_CONNECTION:
+        console.log('[Netezza Driver] Fetching databases...');
+        const databases = await this.executeQuery(this.queries.fetchDatabases);
+        console.log(`[Netezza Driver] Loaded ${databases.length} database(s)`);
+        return databases;
+
+      case ContextValue.DATABASE:
+        const dbName = (item as NSDatabase.IDatabase).database;
+        console.log(`[Netezza Driver] Fetching schemas for database: ${dbName}`);
+        await this.queryWithTimeout(`SET CATALOG ${dbName};`, this.queryTimeout);
+        this.poolManager?.setCatalog(dbName);
+        console.log(`[Netezza Driver] Set current catalog to: ${dbName}`);
+        const schemas = await this.executeQuery(this.queries.fetchSchemas, { database: dbName });
+        console.log(`[Netezza Driver] Loaded ${schemas.length} schema(s)`);
+        return schemas;
+
+      case ContextValue.SCHEMA:
+        const schemaItem = item as NSDatabase.ISchema;
+        console.log(`[Netezza Driver] Fetching objects for schema: ${schemaItem.schema}`);
+
+        const [schemaTables, schemaViews] = await Promise.all([
+          this.executeQuery(this.queries.fetchTables, schemaItem),
+          this.executeQuery(this.queries.fetchViews, schemaItem),
+        ]);
+
+        const enrichedObjects = [...schemaTables, ...schemaViews].map(obj => {
+          const simpleName = obj.tableName || obj.label;
+          const fullyQualified = `${obj.database}.${obj.schema}.${simpleName}`;
+          return {
+            ...obj,
+            tableName: simpleName,
+            label: fullyQualified,
+            detail: simpleName,
+            childType: ContextValue.COLUMN,
+          };
+        });
+
+        console.log(`[Netezza Driver] Loaded ${enrichedObjects.length} objects (${schemaTables.length} tables, ${schemaViews.length} views)`);
+        return enrichedObjects;
+
+      case ContextValue.TABLE:
+      case ContextValue.VIEW:
+        const table = item as NSDatabase.ITable;
+        const tableType = item.type === ContextValue.TABLE ? 'table' : 'view';
+
+        console.log(`[Netezza Driver] Fetching columns for ${tableType}: ${table.schema}.${table.label}`);
+        const columns = await this.executeQuery(this.queries.fetchColumns, table);
+        console.log(`[Netezza Driver] Loaded ${columns.length} columns`);
+
+        return columns.map(col => ({
+          ...col,
+          isLeaf: true,
+          childType: ContextValue.NO_CHILD,
+          type: ContextValue.COLUMN,
+        }));
+
+      case ContextValue.COLUMN:
+        console.log('[Netezza Driver] Warning: getChildrenForItem called for COLUMN (leaf node)');
+        return [];
+    }
+    return [];
+  }
+
+  /**
+   * Searches for database items (schemas, tables, views, columns) based on type
+   */
+  public async searchItems(itemType: ContextValue, search = '', extraParams: any = {}): Promise<NSDatabase.SearchableItem[]> {
+    let schemaContext = extraParams.schema || extraParams.database || extraParams.parentName || null;
+
+    if (!schemaContext && extraParams.parentLabel) {
+      schemaContext = extraParams.parentLabel;
+    }
+    if (!schemaContext && extraParams.parent?.schema) {
+      schemaContext = extraParams.parent.schema;
+    }
+
+    console.log(`[Netezza Driver] Searching for ${itemType}${schemaContext ? ` in schema "${schemaContext}"` : ''} with term: "${search}"`);
+
+    switch (itemType) {
+      case ContextValue.DATABASE:
+      case ContextValue.SCHEMA:
+        const schemas = await this.executeCompletionQuery(
+          (this.queries.searchSchemas as any)({ search })
+        );
+        return schemas.map((s: any) => ({
+          label: s.label,
+          type: ContextValue.SCHEMA,
+          schema: s.schema,
+          database: this.currentCatalog || '',
+          childType: ContextValue.TABLE,
+          iconId: 'schema',
+          detail: 'Schema',
+        } as any));
+
+      case ContextValue.TABLE:
+        const tables = await this.executeCompletionQuery(
+          (this.queries.searchTablesInSchema as any)({ search, schemaContext })
+        );
+        return tables.map((t: any) => ({
+          label: t.label,
+          type: ContextValue.TABLE,
+          schema: t.schema,
+          database: this.currentCatalog || '',
+          tableName: t.table_name,
+          isView: false,
+          childType: ContextValue.COLUMN,
+          iconId: 'table',
+          detail: `Table in ${t.schema}`,
+        } as any));
+
+      case ContextValue.VIEW:
+        const views = await this.executeCompletionQuery(
+          (this.queries.searchViewsInSchema as any)({ search, schemaContext })
+        );
+        return views.map((v: any) => ({
+          label: v.label,
+          type: ContextValue.VIEW,
+          schema: v.schema,
+          database: this.currentCatalog || '',
+          tableName: v.view_name,
+          isView: true,
+          childType: ContextValue.COLUMN,
+          iconId: 'view',
+          detail: `View in ${v.schema}`,
+        } as any));
+
+      case ContextValue.COLUMN:
+        let tableFilter = '';
+        let schemaFilter = '';
+
+        if (extraParams.tables && Array.isArray(extraParams.tables) && extraParams.tables.length > 0) {
+          const tableInfo = extraParams.tables[0];
+          tableFilter = tableInfo.label || tableInfo.table || tableInfo.tableName || '';
+          schemaFilter = tableInfo.database || tableInfo.schema || '';
+        } else {
+          tableFilter = extraParams.table || '';
+          schemaFilter = extraParams.schema || '';
+        }
+
+        const columnsResult = await this.executeCompletionQuery(
+          (this.queries.searchColumnsInTable as any)({ search, schemaFilter, tableFilter })
+        );
+
+        return columnsResult.map((c: any) => ({
+          label: c.label,
+          type: ContextValue.COLUMN,
+          schema: c.schema,
+          database: this.currentCatalog || '',
+          table: c.table_name,
+          columnName: c.label,
+          dataType: c.data_type,
+          isNullable: !c.is_nullable,
+          iconId: 'column',
+          detail: `${c.data_type} - ${c.table_name}`,
+        } as any));
+
+      case ContextValue.FUNCTION:
+        const functions = await this.executeCompletionQuery(
+          (this.queries.searchFunctions as any)({ search })
+        );
+        return functions.map((f: any) => ({
+          label: f.label,
+          type: ContextValue.FUNCTION,
+          schema: f.schema,
+          database: this.currentCatalog || '',
+          name: f.label,
+          iconId: 'function',
+          detail: 'Function',
+        } as any));
+    }
+
+    return [];
+  }
+
+  /**
+   * Describes a table's structure (columns, types, etc.)
+   */
+  public async describeTable(table: NSDatabase.ITable, opt: any = {}): Promise<NSDatabase.IResult[]> {
+    if (table.database) {
+      await this.query(`SET CATALOG ${table.database}`);
+      this.poolManager?.setCatalog(table.database);
+    }
+    const queryStr = typeof this.queries.describeTable === 'function'
+      ? this.queries.describeTable(table)
+      : this.queries.describeTable;
+    return await this.queryWithTimeout(queryStr as string, this.queryTimeout);
+  }
+
+  /**
+   * Executes a query function with parameters and returns the results
+   */
+  private async executeQuery(queryFn: any, params?: any, useConfiguredTimeout = true): Promise<any[]> {
+    const queryStr = typeof queryFn === 'function' ? queryFn(params) : queryFn;
+    const timeout = useConfiguredTimeout ? this.queryTimeout : 10000;
+    const results = await this.queryWithTimeout(queryStr, timeout, undefined, true);
+    return results[0]?.results || [];
+  }
+
+  /**
+   * Fetches records from a table
    */
   public async fetchRecords(params: any): Promise<NSDatabase.IResult[]> {
     const queryStr = this.queries.fetchRecords(params) as string;
@@ -1076,42 +802,31 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
 
   /**
    * Returns a stub result to skip counting records on large Netezza tables
-   * COUNT(*) queries can be very slow, and we already limit results in fetchRecords
    */
   public async countRecords(params: any): Promise<NSDatabase.IResult[]> {
-    // Return a proper result structure with 0 total instead of running the COUNT query
-    const result: NSDatabase.IResult = {
-      connId: this.getId(),
-      requestId: 'countRecords',
-      resultId: generateId(),
-      cols: ['total'],
-      messages: ['Row counting disabled for performance'],
-      query: '-- COUNT query skipped',
-      results: [{ total: 0 }],
-    };
-    return [result];
+    if (!this.resultBuilder) {
+      await this.open();
+    }
+    return [this.resultBuilder!.countStub()];
   }
 
   /**
    * Executes a user-provided query from the editor
    */
   public async runSingleQuery(query: string): Promise<NSDatabase.IResult> {
-    // Use the current catalog (last expanded in object browser) for user queries
-    // This allows queries to run in the context of the database being explored
     let catalogMessage = '';
     if (this.currentCatalog) {
       catalogMessage = `Executing query in catalog: ${this.currentCatalog}`;
       console.log(`[Netezza Driver] ${catalogMessage}`);
     }
-    
+
     const results = await this.query(query);
-    
-    // Add catalog context message to the result
+
     if (catalogMessage && results[0]) {
       results[0].messages = results[0].messages || [];
       results[0].messages.unshift(catalogMessage);
     }
-    
+
     return results[0];
   }
 
@@ -1121,42 +836,42 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
   public async getTableCreateScript(table: NSDatabase.ITable, opt: any = {}): Promise<string[]> {
     if (table.database) {
       await this.query(`SET CATALOG ${table.database}`);
-      this.currentCatalog = table.database;
+      this.poolManager?.setCatalog(table.database);
     }
-    
-    const queryStr = typeof this.queries.getTableCreateScript === 'function' 
-      ? this.queries.getTableCreateScript(table) 
+
+    const queryStr = typeof this.queries.getTableCreateScript === 'function'
+      ? this.queries.getTableCreateScript(table)
       : this.queries.getTableCreateScript;
-    
+
     const results = await this.queryWithTimeout(queryStr as string, this.queryTimeout);
-    
+
     if (results?.[0]?.results?.[0]) {
       const ddl = results[0].results[0].DDL || results[0].results[0].ddl;
       return [ddl];
     }
-    
+
     return ['-- Unable to generate DDL'];
   }
 
   /**
-   * Exports table data in the specified format (CSV by default)
+   * Exports table data in the specified format
    */
   public async exportData(params: any): Promise<string | any[]> {
     const { table, format = 'CSV' } = params;
-    
+
     if (table.database) {
       await this.query(`SET CATALOG ${table.database}`);
-      this.currentCatalog = table.database;
+      this.poolManager?.setCatalog(table.database);
     }
-    
-    const tableName = table.schema 
+
+    const tableName = table.schema
       ? `${table.schema}.${table.tableName || table.label}`
       : (table.tableName || table.label);
-    
+
     const results = await this.query(`SELECT * FROM ${tableName}`);
-    
-    return format === 'CSV' 
-      ? this.resultsToCSV(results[0]) 
+
+    return format === 'CSV'
+      ? this.resultsToCSV(results[0])
       : results[0].results;
   }
 
@@ -1167,23 +882,22 @@ export default class NetezzaDriver extends AbstractDriver<any, any> implements I
     if (!result.cols || result.cols.length === 0) {
       return '';
     }
-    
+
     const headers = result.cols.join(',');
-    
-    const rows = result.results.map(row => 
+
+    const rows = result.results.map(row =>
       result.cols.map(col => {
         const value = row[col];
         if (value == null) return '';
-        
+
         const stringValue = String(value);
-        // Escape quotes and wrap in quotes if needed
         if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
           return `"${stringValue.replace(/"/g, '""')}"`;
         }
         return stringValue;
       }).join(',')
     ).join('\n');
-    
+
     return `${headers}\n${rows}`;
   }
 }

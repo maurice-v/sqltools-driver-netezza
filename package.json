@@ -2,7 +2,7 @@
   "name": "sqltools-driver-netezza",
   "displayName": "SQLTools Netezza Driver",
   "description": "SQLTools driver for Netezza using node-netezza",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "publisher": "maurice-v",
   "author": {
     "name": "maurice-v"
@@ -18,9 +18,9 @@
   "keywords": [
     "sqltools-driver",
     "netezza",
-    "database",
-    "sql",
-    "IBM Netezza"
+    "nz",
+    "IBM Netezza",
+    "IBM PureData System for Analytics"
   ],
   "extensionDependencies": [
     "mtxr.sqltools"
