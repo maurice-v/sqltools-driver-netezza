@@ -232,14 +232,19 @@ export default class NetezzaDriver
       // Use the new cancellation feature from node-netezza v1.3
       onCancel: (cancelFn: () => void) => {
         cancelQuery = cancelFn;
+        // Update the running query with the actual cancel function once it's available
+        if (queryId && this.runningQueries.has(queryId)) {
+          const queryInfo = this.runningQueries.get(queryId)!;
+          queryInfo.cancel = cancelFn;
+        }
       }
     });
 
-    // Track the running query with its cancellation function
+    // Track the running query (cancel function will be set asynchronously in onCancel)
     if (queryId) {
       this.runningQueries.set(queryId, {
         promise: queryPromise,
-        cancel: cancelQuery
+        cancel: undefined // Will be set in onCancel callback
       });
     }
 
@@ -489,7 +494,7 @@ export default class NetezzaDriver
         // Cancel all running queries
         console.log(`[Netezza Driver] Cancelling ${this.runningQueries.size} running queries`);
         console.log(`[Netezza Driver] Current catalog state preserved: ${this.currentCatalog}`);
-        for (const [id, queryInfo] of this.runningQueries) {
+        for (const queryInfo of this.runningQueries.values()) {
           if (queryInfo.cancel) {
             queryInfo.cancel();
           }
