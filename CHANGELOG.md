@@ -2,6 +2,32 @@
 
 All notable changes to the SQLTools Netezza Driver will be documented in this file.
 
+## [1.7.0] - 2025-12-12
+
+### Added
+- **Query cancellation support** using node-netezza v1.3.0's new cancellation feature
+  - True query-level cancellation without disrupting connection pool
+  - Individual query tracking with unique IDs
+  - Granular control over specific query cancellation
+  - Better resource management and cleanup
+  - Support for cancelling multiple queries selectively
+
+### Changed
+- Updated to node-netezza 1.3.0 with query cancellation capabilities
+- Enhanced query execution with proper cancellation token tracking
+- Improved cancelQuery method to use true cancellation instead of connection pool reset
+- Added query ID tracking for all query types (single, multiple, internal queries)
+- Better logging with query ID identification
+
+### Fixed
+- **Critical**: Query cancellation no longer destroys the entire connection pool
+- **Critical**: Catalog state is now properly preserved when SET CATALOG queries are cancelled
+  - Catalog state only updates after successful query execution, not before
+  - Prevents inconsistent catalog state when SET CATALOG queries get cancelled
+- Improved responsiveness of query cancellation
+- Better handling of concurrent query cancellation requests
+- Proper cleanup of cancelled queries from tracking system
+
 ## [1.5.0] - 2025-11-19
 
 ### Added

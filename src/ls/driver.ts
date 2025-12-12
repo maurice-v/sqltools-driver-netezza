@@ -44,9 +44,10 @@ export default class NetezzaDriver
 
   // State
   private queryTimeout: number = DEFAULT_QUERY_TIMEOUT_MS;
-  private runningQueries = new Set<Promise<any>>();
+  private runningQueries = new Map<string, { promise: Promise<any>; cancel?: () => void }>();
   private queryQueue: Promise<any> = Promise.resolve();
   private completionsCache: CompletionsCache | null = null;
+  private queryIdCounter: number = 0;
 
   constructor(credentials: NetezzaCredentials, driverOptions?: any) {
     super(credentials as any, driverOptions);
@@ -140,12 +141,13 @@ export default class NetezzaDriver
     query: string,
     timeoutMs: number,
     queryInfo?: QueryInfo,
-    bypassLimit = false
+    bypassLimit = false,
+    queryId?: string
   ): Promise<NSDatabase.IResult[]> {
     return new Promise((resolve, reject) => {
       this.queryQueue = this.queryQueue.then(async () => {
         try {
-          const result = await this.executeQueryInternal(query, timeoutMs, queryInfo, bypassLimit);
+          const result = await this.executeQueryInternal(query, timeoutMs, queryInfo, bypassLimit, queryId);
           resolve(result);
         } catch (err) {
           reject(err);
@@ -163,7 +165,8 @@ export default class NetezzaDriver
     query: string,
     timeoutMs: number,
     queryInfo?: QueryInfo,
-    bypassLimit = false
+    bypassLimit = false,
+    queryId?: string
   ): Promise<NSDatabase.IResult[]> {
     // Ensure pool is initialized
     await this.open();
@@ -172,13 +175,6 @@ export default class NetezzaDriver
       // Create a temporary result builder if needed for error reporting
       const builder = this.resultBuilder ?? new ResultBuilder(this.getId());
       return [builder.connectionError(query, 'Connection pool not initialized')];
-    }
-
-    // Check if this is a SET CATALOG statement and update currentCatalog
-    const newCatalog = this.queryParser.extractCatalogFromSetStatement(query);
-    if (newCatalog) {
-      console.log(`[Netezza Driver] Detected SET CATALOG, updating currentCatalog to: ${newCatalog}`);
-      this.poolManager.setCatalog(newCatalog);
     }
 
     // Acquire connection from pool
@@ -194,8 +190,19 @@ export default class NetezzaDriver
     console.log(`[Netezza Driver] Query timeout set to: ${timeoutMs}ms`);
 
     try {
-      const result = await this.executeWithTimeout(conn, query, timeoutMs, bypassLimit, startTime);
+      const result = await this.executeWithTimeout(conn, query, timeoutMs, bypassLimit, startTime, queryId);
       await this.poolManager.release(conn);
+      
+      // Update catalog state only after successful SET CATALOG execution
+      const newCatalog = this.queryParser.extractCatalogFromSetStatement(query);
+      if (newCatalog) {
+        console.log(`[Netezza Driver] SET CATALOG executed successfully, updating currentCatalog to: ${newCatalog}`);
+        this.poolManager.setCatalog(newCatalog);
+      }
+      
+      if (queryId) {
+        this.runningQueries.delete(queryId);
+      }
       return [result];
     } catch (err: any) {
       const elapsedTime = Date.now() - startTime;
@@ -204,14 +211,15 @@ export default class NetezzaDriver
   }
 
   /**
-   * Executes query with timeout using Promise.race
+   * Executes query with timeout and cancellation support
    */
   private async executeWithTimeout(
     conn: any,
     query: string,
     timeoutMs: number,
     bypassLimit: boolean,
-    startTime: number
+    startTime: number,
+    queryId?: string
   ): Promise<NSDatabase.IResult> {
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => {
@@ -219,14 +227,29 @@ export default class NetezzaDriver
       }, timeoutMs);
     });
 
-    const queryPromise = conn.execute(query);
-    this.runningQueries.add(queryPromise);
+    let cancelQuery: (() => void) | undefined;
+    const queryPromise = conn.execute(query, {
+      // Use the new cancellation feature from node-netezza v1.3
+      onCancel: (cancelFn: () => void) => {
+        cancelQuery = cancelFn;
+      }
+    });
+
+    // Track the running query with its cancellation function
+    if (queryId) {
+      this.runningQueries.set(queryId, {
+        promise: queryPromise,
+        cancel: cancelQuery
+      });
+    }
 
     try {
       const data = await Promise.race([queryPromise, timeoutPromise]);
       return this.processQueryResult(query, data, startTime, bypassLimit);
     } finally {
-      this.runningQueries.delete(queryPromise);
+      if (queryId) {
+        this.runningQueries.delete(queryId);
+      }
     }
   }
 
@@ -361,7 +384,10 @@ export default class NetezzaDriver
    * Executes a SQL query with the configured timeout
    */
   public async query(query: string, opt: any = {}): Promise<NSDatabase.IResult[]> {
+    const queryId = opt.queryId || `query_${++this.queryIdCounter}_${Date.now()}`;
+    
     console.log('[Netezza Driver] query() called with:');
+    console.log('  Query ID:', queryId);
     console.log('  Query length:', query.length);
     console.log('  Query preview:', JSON.stringify(query.substring(0, 100)));
 
@@ -370,33 +396,43 @@ export default class NetezzaDriver
       return [];
     }
 
-    // Parse the query to check if it contains multiple statements
-    const parsedQueries = this.queryParser.parse(query);
-    console.log(`[Netezza Driver] Parsed ${parsedQueries.length} query/queries`);
+    try {
+      // Parse the query to check if it contains multiple statements
+      const parsedQueries = this.queryParser.parse(query);
+      console.log(`[Netezza Driver] Parsed ${parsedQueries.length} query/queries`);
 
-    if (parsedQueries.length > 1) {
-      return this.executeMultipleQueries(parsedQueries);
+      if (parsedQueries.length > 1) {
+        return this.executeMultipleQueries(parsedQueries, queryId);
+      }
+
+      return this.queryWithTimeout(query, this.queryTimeout, undefined, false, queryId);
+    } catch (err: any) {
+      console.error('[Netezza Driver] Query execution failed:', err);
+      this.runningQueries.delete(queryId);
+      if (!this.resultBuilder) {
+        this.resultBuilder = new ResultBuilder(this.getId());
+      }
+      return [this.resultBuilder.error(query, err.message || String(err))];
     }
-
-    return this.queryWithTimeout(query, this.queryTimeout);
   }
 
   /**
    * Executes multiple queries sequentially
    */
-  private async executeMultipleQueries(queries: string[]): Promise<NSDatabase.IResult[]> {
+  private async executeMultipleQueries(queries: string[], baseQueryId?: string): Promise<NSDatabase.IResult[]> {
     console.log(`[Netezza Driver] Executing ${queries.length} queries sequentially`);
     const allResults: NSDatabase.IResult[] = [];
     const overallStartTime = Date.now();
 
     for (let i = 0; i < queries.length; i++) {
       const queryText = queries[i];
-      console.log(`[Netezza Driver] Executing query ${i + 1} of ${queries.length}`);
+      const subQueryId = baseQueryId ? `${baseQueryId}_${i + 1}` : `subquery_${i + 1}_${Date.now()}`;
+      console.log(`[Netezza Driver] Executing query ${i + 1} of ${queries.length} (ID: ${subQueryId})`);
 
       const results = await this.queryWithTimeout(queryText, this.queryTimeout, {
         index: i + 1,
         total: queries.length,
-      });
+      }, false, subQueryId);
       allResults.push(...results);
     }
 
@@ -431,16 +467,35 @@ export default class NetezzaDriver
   }
 
   /**
-   * Cancels running queries by resetting the connection pool
+   * Cancels running queries using the new query-level cancellation feature
    */
-  public async cancelQuery(): Promise<void> {
+  public async cancelQuery(queryId?: string): Promise<void> {
     if (this.runningQueries.size === 0) {
+      console.log('[Netezza Driver] No running queries to cancel');
       return;
     }
 
     try {
-      await this.close();
-      this.runningQueries.clear();
+      if (queryId && this.runningQueries.has(queryId)) {
+        // Cancel specific query
+        const queryInfo = this.runningQueries.get(queryId);
+        if (queryInfo?.cancel) {
+          console.log(`[Netezza Driver] Cancelling query: ${queryId}`);
+          console.log(`[Netezza Driver] Current catalog state preserved: ${this.currentCatalog}`);
+          queryInfo.cancel();
+          this.runningQueries.delete(queryId);
+        }
+      } else {
+        // Cancel all running queries
+        console.log(`[Netezza Driver] Cancelling ${this.runningQueries.size} running queries`);
+        console.log(`[Netezza Driver] Current catalog state preserved: ${this.currentCatalog}`);
+        for (const [id, queryInfo] of this.runningQueries) {
+          if (queryInfo.cancel) {
+            queryInfo.cancel();
+          }
+        }
+        this.runningQueries.clear();
+      }
     } catch (err: any) {
       console.error('[Netezza Driver] Failed to cancel query:', err);
       throw err;
@@ -603,7 +658,7 @@ export default class NetezzaDriver
       case ContextValue.DATABASE:
         const dbName = (item as NSDatabase.IDatabase).database;
         console.log(`[Netezza Driver] Fetching schemas for database: ${dbName}`);
-        await this.queryWithTimeout(`SET CATALOG ${dbName};`, this.queryTimeout);
+        await this.queryWithTimeout(`SET CATALOG ${dbName};`, this.queryTimeout, undefined, false, `set_catalog_${Date.now()}`);
         this.poolManager?.setCatalog(dbName);
         console.log(`[Netezza Driver] Set current catalog to: ${dbName}`);
         const schemas = await this.executeQuery(this.queries.fetchSchemas, { database: dbName });
@@ -779,7 +834,7 @@ export default class NetezzaDriver
     const queryStr = typeof this.queries.describeTable === 'function'
       ? this.queries.describeTable(table)
       : this.queries.describeTable;
-    return await this.queryWithTimeout(queryStr as string, this.queryTimeout);
+    return await this.queryWithTimeout(queryStr as string, this.queryTimeout, undefined, false, `describe_table_${Date.now()}`);
   }
 
   /**
@@ -788,7 +843,7 @@ export default class NetezzaDriver
   private async executeQuery(queryFn: any, params?: any, useConfiguredTimeout = true): Promise<any[]> {
     const queryStr = typeof queryFn === 'function' ? queryFn(params) : queryFn;
     const timeout = useConfiguredTimeout ? this.queryTimeout : 10000;
-    const results = await this.queryWithTimeout(queryStr, timeout, undefined, true);
+    const results = await this.queryWithTimeout(queryStr, timeout, undefined, true, `internal_${Date.now()}`);
     return results[0]?.results || [];
   }
 
@@ -843,7 +898,7 @@ export default class NetezzaDriver
       ? this.queries.getTableCreateScript(table)
       : this.queries.getTableCreateScript;
 
-    const results = await this.queryWithTimeout(queryStr as string, this.queryTimeout);
+    const results = await this.queryWithTimeout(queryStr as string, this.queryTimeout, undefined, false, `show_records_${Date.now()}`);
 
     if (results?.[0]?.results?.[0]) {
       const ddl = results[0].results[0].DDL || results[0].results[0].ddl;
