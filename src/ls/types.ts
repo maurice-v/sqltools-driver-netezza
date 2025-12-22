@@ -43,7 +43,6 @@ export interface NetezzaCredentials {
   database: string;
   username: string;
   password: string;
-  pageSize?: number;
   previewLimit?: number;
   netezzaOptions?: NetezzaDriverOptions;
 }

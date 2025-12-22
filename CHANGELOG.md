@@ -2,6 +2,15 @@
 
 All notable changes to the SQLTools Netezza Driver will be documented in this file.
 
+## [1.7.1] - 2025-12-22
+
+### Changed
+- Results viewer pageSize now matches previewLimit setting for consistent pagination
+- Enhanced result truncation messaging with actionable guidance
+
+### Fixed
+- Ensured proper connection release on query errors to prevent pool exhaustion
+
 ## [1.7.0] - 2025-12-12
 
 ### Added

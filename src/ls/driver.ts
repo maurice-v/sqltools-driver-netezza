@@ -206,6 +206,17 @@ export default class NetezzaDriver
       return [result];
     } catch (err: any) {
       const elapsedTime = Date.now() - startTime;
+      
+      // CRITICAL: Always release the connection back to the pool, even on error
+      // This prevents pool exhaustion when multiple errors occur
+      if (conn && this.poolManager) {
+        try {
+          await this.poolManager.release(conn);
+        } catch (releaseErr) {
+          console.error('[Netezza Driver] Error releasing connection after query failure:', releaseErr);
+        }
+      }
+      
       return [this.handleQueryError(conn, query, err, timeoutMs, elapsedTime)];
     }
   }
@@ -304,13 +315,14 @@ export default class NetezzaDriver
     messages.push(`Elapsed time: ${elapsedTime}ms`);
 
     // Limit rows to prevent UI hang with large result sets
-    const pageSize = this.credentials.pageSize || 50;
-    const maxRows = this.credentials.previewLimit || pageSize;
+    const maxRows = this.credentials.previewLimit || 500;
     const totalRows = rows.length;
     const isLimited = !bypassLimit && maxRows > 0 && rows.length > maxRows;
     if (isLimited) {
       rows = rows.slice(0, maxRows);
-      messages.push(`Query returned ${totalRows} rows. Showing first ${maxRows} rows. Adjust 'Show records default limit' in connection settings to change this limit.`);
+      const limitMessage = `⚠️ WARNING: Query returned ${totalRows} rows but only ${maxRows} are shown. This limit is controlled via 'previewLimit' in connection settings`;
+      messages.push(limitMessage);
+      console.warn(`[Netezza Driver] ${limitMessage}`);
     }
 
     // Add row count for non-SELECT queries
@@ -318,12 +330,17 @@ export default class NetezzaDriver
       messages.push(`${data.rowCount} rows affected`);
     }
 
-    return this.resultBuilder!.success(
+    const result = this.resultBuilder!.success(
       query,
       cols.map((c: any) => c.name || c),
       rows,
       messages
     );
+
+    // Set pageSize to match previewLimit for consistent pagination in results viewer
+    result.pageSize = maxRows;
+
+    return result;
   }
 
   /**
@@ -340,16 +357,8 @@ export default class NetezzaDriver
 
     const isTimeout = err.message && err.message.includes('timeout');
 
-    // Close the bad connection
-    if (conn && this.poolManager) {
-      if (isTimeout) {
-        this.poolManager.closeConnection(conn);
-      } else {
-        this.poolManager.closeConnection(conn);
-      }
-    }
-
-    // For severe errors, reset the pool
+    // For severe errors (timeouts, connection resets), reset the pool
+    // Note: Connection is already released back to pool in executeQueryInternal
     if (isTimeout || err.code === 'ECONNRESET' || err.code === 'ECONNREFUSED') {
       console.log('[Netezza Driver] Severe error detected, recreating connection pool');
       this.resetPool();
@@ -361,8 +370,6 @@ export default class NetezzaDriver
 
     const additionalMessages = [
       `Elapsed time: ${elapsedTime}ms`,
-      `─────────────────────────────────────────`,
-      `Connection closed. Will reconnect for next query.`,
     ];
 
     return this.resultBuilder!.error(query, err, additionalMessages, this.currentCatalog);
@@ -856,7 +863,9 @@ export default class NetezzaDriver
    * Fetches records from a table
    */
   public async fetchRecords(params: any): Promise<NSDatabase.IResult[]> {
-    const queryStr = this.queries.fetchRecords(params) as string;
+    // Override limit with previewLimit from connection settings
+    const limit = this.credentials.previewLimit || params.limit || 500;
+    const queryStr = this.queries.fetchRecords({ ...params, limit }) as string;
     return this.query(queryStr);
   }
 
